@@ -25,6 +25,7 @@
     "lint": "eslint src",
     "perf": "node test/performance/run-performance-suite.js",
     "perf:json": "node test/performance/run-performance-suite.js --json",
+    "perf:stable": "node test/performance/run-performance-suite.js --runs 5",
     "doc": "jsdoc --configure jsdoc.json .",
     "cover": "nyc _mocha",
     "minify": "uglifyjs jsonata.js -o jsonata.min.js --compress --mangle",

@@ -779,6 +779,29 @@ const functions = (() => {
     }
 
     /**
+     * Fast path for the common grouped decimal picture.
+     * @param {number} value - number to format
+     * @returns {string} formatted number
+     */
+    function formatDefaultDecimal(value) {
+        var rounded = round(value, 2);
+        var negative = rounded < 0;
+        var stringValue = Math.abs(rounded).toFixed(2);
+        var decimalPos = stringValue.indexOf('.');
+        var integerPart = stringValue.substring(0, decimalPos);
+        var result = "";
+        var firstGroupLength = integerPart.length % 3;
+        if(firstGroupLength === 0) {
+            firstGroupLength = 3;
+        }
+        result = integerPart.substring(0, firstGroupLength);
+        for(var ii = firstGroupLength; ii < integerPart.length; ii += 3) {
+            result += "," + integerPart.substring(ii, ii + 3);
+        }
+        return (negative ? "-" : "") + result + stringValue.substring(decimalPos);
+    }
+
+    /**
      * Formats a number into a decimal string representation using XPath 3.1 F&O fn:format-number spec
      * @param {number} value - number to format
      * @param {String} picture - picture string definition
@@ -789,6 +812,10 @@ const functions = (() => {
         // undefined inputs always return undefined
         if (typeof value === 'undefined') {
             return undefined;
+        }
+
+        if(typeof options === 'undefined' && picture === "#,##0.00" && isFinite(value) && Math.abs(value) < 1e21) {
+            return formatDefaultDecimal(value);
         }
 
         var analysisCacheKey = picture + "\u0000" + (typeof options === 'undefined' ? "" : JSON.stringify(options));
@@ -2028,43 +2055,43 @@ const functions = (() => {
             comp = comparator;
         }
 
-        var merge = async function (left, right) {
-            var merged = new Array(left.length + right.length);
-            var leftIndex = 0;
-            var rightIndex = 0;
-            var mergedIndex = 0;
-            while (leftIndex < left.length && rightIndex < right.length) {
-                if (await comp(left[leftIndex], right[rightIndex])) { // invoke the comparator function
-                    // if it returns true - swap left and right
-                    merged[mergedIndex++] = right[rightIndex++];
-                } else {
-                    // otherwise keep the same order
-                    merged[mergedIndex++] = left[leftIndex++];
+        var length = arr.length;
+        var source = new Array(length);
+        for(var ii = 0; ii < length; ii++) {
+            source[ii] = arr[ii];
+        }
+        var target = new Array(length);
+
+        for(var width = 1; width < length; width *= 2) {
+            for(var start = 0; start < length; start += width * 2) {
+                var leftIndex = start;
+                var rightIndex = Math.min(start + width, length);
+                var leftEnd = rightIndex;
+                var rightEnd = Math.min(start + width * 2, length);
+                var targetIndex = start;
+
+                while(leftIndex < leftEnd && rightIndex < rightEnd) {
+                    if(await comp(source[leftIndex], source[rightIndex])) { // invoke the comparator function
+                        // if it returns true - swap left and right
+                        target[targetIndex++] = source[rightIndex++];
+                    } else {
+                        // otherwise keep the same order
+                        target[targetIndex++] = source[leftIndex++];
+                    }
+                }
+                while(leftIndex < leftEnd) {
+                    target[targetIndex++] = source[leftIndex++];
+                }
+                while(rightIndex < rightEnd) {
+                    target[targetIndex++] = source[rightIndex++];
                 }
             }
-            while (leftIndex < left.length) {
-                merged[mergedIndex++] = left[leftIndex++];
-            }
-            while (rightIndex < right.length) {
-                merged[mergedIndex++] = right[rightIndex++];
-            }
-            return merged;
-        };
+            var tmp = source;
+            source = target;
+            target = tmp;
+        }
 
-        var msort = async function (array) {
-            if (!Array.isArray(array) || array.length <= 1) {
-                return array;
-            } else {
-                var middle = Math.floor(array.length / 2);
-                var left = array.slice(0, middle);
-                var right = array.slice(middle);
-                left = await msort(left);
-                right = await msort(right);
-                return await merge(left, right);
-            }
-        };
-
-        var result = await msort(arr);
+        var result = source;
 
         return result;
     }

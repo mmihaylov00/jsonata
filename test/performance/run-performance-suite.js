@@ -11,6 +11,7 @@ var jsonata = require("../../src/jsonata");
 
 var DEFAULT_WARMUP = 1;
 var DEFAULT_ITERATIONS = 3;
+var DEFAULT_RUNS = 1;
 var DEFAULT_TOP = 15;
 
 /**
@@ -34,13 +35,14 @@ function elapsedMs(start) {
 /**
  * Parse command-line options.
  * @param {string[]} argv - Process arguments after the script name.
- * @returns {{json: boolean, warmup: number, iterations: number, top: number}} Parsed options.
+ * @returns {{json: boolean, warmup: number, iterations: number, runs: number, top: number}} Parsed options.
  */
 function parseArgs(argv) {
     var options = {
         json: false,
         warmup: DEFAULT_WARMUP,
         iterations: DEFAULT_ITERATIONS,
+        runs: DEFAULT_RUNS,
         top: DEFAULT_TOP
     };
 
@@ -52,12 +54,16 @@ function parseArgs(argv) {
             options.warmup = Number(argv[++ii]);
         } else if(arg === "--iterations") {
             options.iterations = Number(argv[++ii]);
+        } else if(arg === "--runs") {
+            options.runs = Number(argv[++ii]);
         } else if(arg === "--top") {
             options.top = Number(argv[++ii]);
         } else if(arg.indexOf("--warmup=") === 0) {
             options.warmup = Number(arg.substring("--warmup=".length));
         } else if(arg.indexOf("--iterations=") === 0) {
             options.iterations = Number(arg.substring("--iterations=".length));
+        } else if(arg.indexOf("--runs=") === 0) {
+            options.runs = Number(arg.substring("--runs=".length));
         } else if(arg.indexOf("--top=") === 0) {
             options.top = Number(arg.substring("--top=".length));
         } else if(arg === "--help" || arg === "-h") {
@@ -73,6 +79,9 @@ function parseArgs(argv) {
     if(!Number.isInteger(options.iterations) || options.iterations < 1) {
         throw new Error("--iterations must be a positive integer");
     }
+    if(!Number.isInteger(options.runs) || options.runs < 1) {
+        throw new Error("--runs must be a positive integer");
+    }
     if(!Number.isInteger(options.top) || options.top < 1) {
         throw new Error("--top must be a positive integer");
     }
@@ -85,7 +94,7 @@ function parseArgs(argv) {
  */
 function printUsage() {
     console.log([
-        "Usage: npm run perf -- [--json] [--warmup N] [--iterations N] [--top N]",
+        "Usage: npm run perf -- [--json] [--warmup N] [--iterations N] [--runs N] [--top N]",
         "",
         "Runs report-only compile/evaluate benchmarks over the portable JSONata",
         "test-suite cases and targeted performance scenarios."
@@ -434,6 +443,67 @@ function summarizeGroups(results) {
 }
 
 /**
+ * Calculate a population standard deviation.
+ * @param {number[]} values - Values to summarize.
+ * @returns {number} Population standard deviation.
+ */
+function stdDev(values) {
+    if(values.length === 0) {
+        return 0;
+    }
+    var mean = values.reduce((total, value) => total + value, 0) / values.length;
+    var variance = values.reduce((total, value) => {
+        var delta = value - mean;
+        return total + delta * delta;
+    }, 0) / values.length;
+    return Math.sqrt(variance);
+}
+
+/**
+ * Average benchmark case results across repeated runs.
+ * @param {Array[]} runResults - Per-run benchmark results.
+ * @param {Object} options - Run options.
+ * @returns {Array} Averaged benchmark results.
+ */
+function averageRunResults(runResults, options) {
+    var samplesByLabel = Object.create(null);
+    var orderedLabels = [];
+
+    runResults.forEach(results => {
+        results.forEach(result => {
+            if(!samplesByLabel[result.label]) {
+                samplesByLabel[result.label] = [];
+                orderedLabels.push(result.label);
+            }
+            samplesByLabel[result.label].push(result);
+        });
+    });
+
+    return orderedLabels.map(label => {
+        var samples = samplesByLabel[label];
+        var first = samples[0];
+        var compileSamples = samples.map(sample => sample.compileMs);
+        var evalSamples = samples.map(sample => sample.evalMs);
+        var compileMs = compileSamples.reduce((total, value) => total + value, 0) / samples.length;
+        var evalMs = evalSamples.reduce((total, value) => total + value, 0) / samples.length;
+        return {
+            source: first.source,
+            label: first.label,
+            name: first.name,
+            group: first.group,
+            mode: first.mode,
+            compileMs: compileMs,
+            evalMs: evalMs,
+            compileMeanMs: compileMs / options.iterations,
+            evalMeanMs: first.mode === "compile" ? 0 : evalMs / options.iterations,
+            compileStdDevMs: stdDev(compileSamples),
+            evalStdDevMs: stdDev(evalSamples),
+            runs: samples.length
+        };
+    });
+}
+
+/**
  * Build the full benchmark report.
  * @param {Object} options - Run options.
  * @returns {Promise<Object>} Report.
@@ -445,11 +515,18 @@ async function buildReport(options) {
     var suite = loadSuiteCases(suiteRoot, datasets);
     var targeted = loadTargetedCases(path.join(__dirname, "benchmarks.json"), datasets);
     var allCases = suite.cases.concat(targeted);
-    var run = await runCases(allCases, options);
-    var groups = summarizeGroups(run.results);
-    var slowestEval = run.results.filter(result => result.mode !== "compile").
+    var runResults = [];
+    var failures = [];
+    for(var runIndex = 0; runIndex < options.runs; runIndex++) {
+        var run = await runCases(allCases, options);
+        runResults.push(run.results);
+        failures = failures.concat(run.failures);
+    }
+    var results = options.runs === 1 ? runResults[0] : averageRunResults(runResults, options);
+    var groups = summarizeGroups(results);
+    var slowestEval = results.filter(result => result.mode !== "compile").
         slice().sort((lhs, rhs) => rhs.evalMeanMs - lhs.evalMeanMs).slice(0, options.top);
-    var slowestCompile = run.results.slice().
+    var slowestCompile = results.slice().
         sort((lhs, rhs) => rhs.compileMeanMs - lhs.compileMeanMs).slice(0, options.top);
 
     return {
@@ -459,18 +536,19 @@ async function buildReport(options) {
             arch: process.arch,
             warmup: options.warmup,
             iterations: options.iterations,
+            runs: options.runs,
             generatedAt: new Date().toISOString()
         },
         totals: {
             cases: allCases.length,
-            measured: run.results.length,
+            measured: results.length,
             skipped: suite.skipped.length,
-            failures: run.failures.length
+            failures: failures.length
         },
         groups: groups,
         slowestEval: slowestEval,
         slowestCompile: slowestCompile,
-        failures: run.failures,
+        failures: failures,
         skipped: suite.skipped
     };
 }
@@ -491,7 +569,7 @@ function formatMs(value) {
 function printReport(report) {
     console.log("JSONata performance report");
     console.log("Node: " + report.metadata.node + "  platform: " + report.metadata.platform + "/" + report.metadata.arch);
-    console.log("Warmup: " + report.metadata.warmup + "  iterations: " + report.metadata.iterations);
+    console.log("Warmup: " + report.metadata.warmup + "  iterations: " + report.metadata.iterations + "  runs: " + report.metadata.runs);
     console.log("Cases: " + report.totals.measured + " measured, " + report.totals.skipped + " skipped, " + report.totals.failures + " failures");
     console.log("");
 
@@ -555,6 +633,7 @@ if(require.main === module) {
 }
 
 module.exports = {
+    averageRunResults,
     buildReport,
     generateData,
     loadSuiteCases,

@@ -20,6 +20,7 @@ const dateTime = (function () {
     const integerRegexCache = Object.create(null);
     const dateTimePictureCache = Object.create(null);
     const dateTimeRegexCache = Object.create(null);
+    const iso8601Picture = '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]';
 
     const getCachedValue = function(cache, key, factory) {
         if(Object.prototype.hasOwnProperty.call(cache, key)) {
@@ -943,8 +944,8 @@ const dateTime = (function () {
         if(typeof picture === 'undefined') {
             // default to ISO 8601 format
             if (iso8601Spec === null) {
-                iso8601Spec = getCachedValue(dateTimePictureCache, '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]', function() {
-                    return analyseDateTimePicture('[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]');
+                iso8601Spec = getCachedValue(dateTimePictureCache, iso8601Picture, function() {
+                    return analyseDateTimePicture(iso8601Picture);
                 });
             }
             formatSpec = iso8601Spec;
@@ -1382,6 +1383,10 @@ const dateTime = (function () {
         // undefined inputs always return undefined
         if(typeof millis === 'undefined') {
             return undefined;
+        }
+
+        if(picture === iso8601Picture && typeof timezone === 'undefined' && isFinite(millis)) {
+            return new Date(millis).toISOString();
         }
 
         return formatDateTime.call(this, millis, picture, timezone);

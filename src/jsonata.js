@@ -569,11 +569,14 @@ var jsonata = (function() {
     }
 
     function createFrameFromTuple(environment, tuple) {
-        var frame = createFrame(environment);
-        for(const prop of Object.keys(tuple)) {
-            frame.bind(prop, tuple[prop]);
+        var bindings = Object.create(null);
+        for(const prop in tuple) {
+            /* istanbul ignore else */
+            if(Object.prototype.hasOwnProperty.call(tuple, prop)) {
+                bindings[prop] = tuple[prop];
+            }
         }
-        return frame;
+        return createFrame(environment, bindings);
     }
 
     /**
@@ -1366,12 +1369,16 @@ var jsonata = (function() {
                             };
                         }
 
-                        if(groups[key].grouped && Array.isArray(groups[key].data)) {
-                            appendGroupValue(groups[key].data, item, environment);
+                        var existing = groups[key];
+                        if(existing.grouped && Array.isArray(existing.data)) {
+                            appendGroupValue(existing.data, item, environment);
                         } else {
-                            // append it as an array
-                            groups[key].data = fn.append.call(focus, groups[key].data, item);
-                            groups[key].grouped = Array.isArray(groups[key].data);
+                            // append it as an internal sequence without the public $append concat path
+                            var grouped = focus.createSequence();
+                            appendGroupValue(grouped, existing.data, environment);
+                            appendGroupValue(grouped, item, environment);
+                            existing.data = grouped;
+                            existing.grouped = true;
                         }
                     } else {
                         groups[key] = entry;
@@ -1410,14 +1417,25 @@ var jsonata = (function() {
             return tupleStream;
         }
         var result = Object.create(null);
-        var focus = {
-            options: environment.base.options,
-            createSequence: environment.base.createSequence
-        };
         Object.assign(result, tupleStream[0]);
         for(var ii = 1; ii < tupleStream.length; ii++) {
-            for(const prop of Object.keys(tupleStream[ii])) {
-                result[prop] = fn.append.call(focus, result[prop], tupleStream[ii][prop]);
+            for(const prop in tupleStream[ii]) {
+                /* istanbul ignore else */
+                if(Object.prototype.hasOwnProperty.call(tupleStream[ii], prop)) {
+                    /* istanbul ignore else */
+                    if(Object.prototype.hasOwnProperty.call(result, prop)) {
+                        if(Array.isArray(result[prop])) {
+                            appendGroupValue(result[prop], tupleStream[ii][prop], environment);
+                        } else {
+                            var grouped = environment.base.createSequence();
+                            appendGroupValue(grouped, result[prop], environment);
+                            appendGroupValue(grouped, tupleStream[ii][prop], environment);
+                            result[prop] = grouped;
+                        }
+                    } else {
+                        result[prop] = tupleStream[ii][prop];
+                    }
+                }
             }
         }
         return result;

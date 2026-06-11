@@ -11,6 +11,7 @@
 "use strict";
 
 var jsonata = require("../src/jsonata");
+var datetime = require("../src/datetime");
 var functions = require("../src/functions");
 var utils = require("../src/utils");
 var chai = require("chai");
@@ -1676,5 +1677,38 @@ describe("Tests optimized helper branches", () => {
         var expr = jsonata('arr{"a": $}');
         var result = await expr.evaluate({arr: [[1], [2], [3]]});
         expect(result).to.deep.equal({a: [1, 2, 3]});
+    });
+
+    it("fast-formats the common grouped decimal picture", function() {
+        expect(functions.formatNumber(1234.5, "#,##0.00")).to.equal("1,234.50");
+        expect(functions.formatNumber(123456.7, "#,##0.00")).to.equal("123,456.70");
+        expect(functions.formatNumber(-1234.5, "#,##0.00")).to.equal("-1,234.50");
+        expect(functions.formatNumber(-0.004, "#,##0.00")).to.equal("0.00");
+        expect(functions.formatNumber(1e21, "#,##0.00")).to.equal(functions.formatNumber(1e21, "#,##0.00", {}));
+    });
+
+    it("fast-formats the exact ISO date-time picture", async function() {
+        var picture = "[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]";
+        expect(datetime.toMillis("2020-01-02T03:04:05.006Z", picture)).to.equal(undefined);
+        expect(datetime.fromMillis(1577934245006, picture)).to.equal("2020-01-02T03:04:05.006Z");
+        var expr = jsonata("[$fromMillis(1577934245006, picture)]");
+        var result = await expr.evaluate({}, {picture: picture});
+        expect(result).to.deep.equal(["2020-01-02T03:04:05.006Z"]);
+    });
+
+    it("sorts without recursive slice allocations", async function() {
+        var originalSlice = Array.prototype.slice;
+        var sliceCalls = 0;
+        try {
+            Array.prototype.slice = function() {
+                sliceCalls++;
+                return originalSlice.apply(this, arguments);
+            };
+            var result = await functions.sort([5, 3, 4, 1, 2]);
+            expect(result).to.deep.equal([1, 2, 3, 4, 5]);
+        } finally {
+            Array.prototype.slice = originalSlice;
+        }
+        expect(sliceCalls).to.equal(0);
     });
 });

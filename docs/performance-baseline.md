@@ -205,6 +205,57 @@ Notable changes compared with the indexed-filter-fast-path run:
 - The fast path is intentionally narrow and falls back to normal evaluation for signatures, tail-call lambdas, predicates/groups, non-parameter variables, evaluator entry/exit callbacks, and frame-push callbacks.
 - `performance` and `target-path` remained effectively flat relative to the indexed-filter run; the path optimizations are unchanged.
 
+## After Stable Runner And Hot-Path Optimizations
+
+Generated with:
+
+```bash
+npm run perf -- --runs 10 --top 12
+```
+
+This run averages 10 full benchmark passes with `warmup=1` and `iterations=3`, so the values below are less sensitive to single-run timing noise than earlier report-only samples.
+
+Top groups by total evaluate time:
+
+| Group | Eval ms | Compile ms | Cases |
+| --- | ---: | ---: | ---: |
+| `performance` | 15.751 | 0.335 | 2 |
+| `target-path` | 14.512 | 0.419 | 2 |
+| `joins` | 5.578 | 3.880 | 39 |
+| `target-number-format` | 5.136 | 0.106 | 1 |
+| `target-sort` | 4.753 | 0.081 | 1 |
+| `object-constructor` | 4.180 | 1.712 | 22 |
+| `lambdas` | 3.827 | 1.521 | 14 |
+| `target-transform` | 3.662 | 0.132 | 1 |
+| `target-date-time` | 3.530 | 0.122 | 1 |
+| `parent-operator` | 2.934 | 2.446 | 28 |
+| `tail-recursion` | 2.765 | 0.486 | 3 |
+| `target-group` | 1.891 | 0.114 | 1 |
+
+Current 10-run average compared with the pre-pass 5-run stable sample:
+
+| Group | Before eval ms | Current eval ms | Change |
+| --- | ---: | ---: | ---: |
+| `target-transform` | 5.806 | 3.662 | -36.9% |
+| `target-number-format` | 7.348 | 5.136 | -30.1% |
+| `target-date-time` | 5.019 | 3.530 | -29.7% |
+| `target-sort` | 6.322 | 4.753 | -24.8% |
+| `lambdas` | 4.534 | 3.827 | -15.6% |
+| `target-hof` | 1.062 | 0.942 | -11.3% |
+| `joins` | 6.006 | 5.578 | -7.1% |
+| `target-group` | 2.025 | 1.891 | -6.6% |
+| `object-constructor` | 4.428 | 4.180 | -5.6% |
+| `performance` | 16.351 | 15.751 | -3.7% |
+| `target-path` | 14.705 | 14.512 | -1.3% |
+
+Notable changes:
+
+- Added `npm run perf:stable` and `--runs` support to average full benchmark runs.
+- Replaced recursive sort splitting with an iterative stable merge sort that avoids repeated `slice()` allocation while preserving async comparator behavior.
+- Avoided public `$append` concat copies in internal group and tuple accumulation.
+- Added exact hot paths for `#,##0.00` number formatting and exact ISO date-time formatting. The number fast path falls back for exponential-scale values so existing `1e21` behavior is preserved, and explicit-picture `$toMillis()` behavior is unchanged.
+- The path-heavy groups are still the largest totals, but this pass targeted remaining execution overhead after the earlier path memoization and indexed-filter work.
+
 ## Remaining Pain Points
 
 The path-heavy cases are again the clear top groups after the HOF callback improvement, but they are still far below the original baseline. The main indexed suffix case is near the rest of the targeted hot operations.
