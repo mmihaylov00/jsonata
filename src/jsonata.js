@@ -41,6 +41,7 @@ var jsonata = (function() {
     var memoizedPathSymbol = Symbol('jsonata.memoizedPath');
     var indexedFilterSymbol = Symbol('jsonata.indexedFilter');
     var pureSortSymbol = Symbol('jsonata.pureSort');
+    var directCallbackSymbol = Symbol.for('jsonata.__direct_callback');
 
     function setHiddenProperty(expr, key, value) {
         Object.defineProperty(expr, key, {
@@ -1898,13 +1899,17 @@ var jsonata = (function() {
         for (var jj = 0; jj < expr.arguments.length; jj++) {
             const arg = await evaluate(expr.arguments[jj], input, environment);
             if(isFunction(arg)) {
-                // wrap this in a closure
-                const closure = async function (...params) {
-                    // invoke func
-                    return await apply(arg, params, null, environment);
-                };
-                closure.arity = getFunctionArity(arg);
-                evaluatedArgs.push(closure);
+                if(isLambda(arg) && canApplyLambdaDirectly(proc)) {
+                    evaluatedArgs.push(createNativeCallbackLambda(arg, environment));
+                } else {
+                    // wrap this in a closure
+                    const closure = async function (...params) {
+                        // invoke func
+                        return await apply(arg, params, null, environment);
+                    };
+                    closure.arity = getFunctionArity(arg);
+                    evaluatedArgs.push(closure);
+                }
             } else {
                 evaluatedArgs.push(arg);
             }
@@ -1929,6 +1934,136 @@ var jsonata = (function() {
             throw err;
         }
         return result;
+    }
+
+    var nativeCallbackFunctions = [
+        fn.map,
+        fn.filter,
+        fn.single,
+        fn.foldLeft,
+        fn.sift,
+        fn.each
+    ];
+
+    function canApplyLambdaDirectly(proc) {
+        return proc && proc._jsonata_function === true &&
+            nativeCallbackFunctions.indexOf(proc.implementation) !== -1;
+    }
+
+    function createNativeCallbackLambda(arg, environment) {
+        var callback = Object.create(arg);
+        var reusableArgs = [];
+        var fastEvaluate = createFastLambdaEvaluator(arg, environment);
+        callback[directCallbackSymbol] = true;
+        callback.arity = getFunctionArity(arg);
+        var invokeWithLength = function(length, arg1, arg2, arg3, arg4) {
+            reusableArgs[0] = arg1;
+            if(length >= 2) {
+                reusableArgs[1] = arg2;
+            }
+            if(length >= 3) {
+                reusableArgs[2] = arg3;
+            }
+            if(length >= 4) {
+                reusableArgs[3] = arg4;
+            }
+            reusableArgs.length = length;
+            if(fastEvaluate) {
+                return fastEvaluate(reusableArgs);
+            }
+            return apply(arg, reusableArgs, null, environment);
+        };
+        callback.invoke = function(arg1, arg2, arg3) {
+            var length = callback.arity < 1 ? 1 : callback.arity;
+            return invokeWithLength(length, arg1, arg2, arg3);
+        };
+        callback.invokeReduce = function(arg1, arg2, arg3, arg4) {
+            return invokeWithLength(callback.arity, arg1, arg2, arg3, arg4);
+        };
+        return callback;
+    }
+
+    function createFastLambdaEvaluator(proc, environment) {
+        if(typeof proc.signature !== 'undefined' || proc.thunk === true || typeof proc.body === 'function' ||
+            environment.lookup(Symbol.for('jsonata.__evaluate_entry')) ||
+            environment.lookup(Symbol.for('jsonata.__evaluate_exit')) ||
+            environment.lookup(Symbol.for('jsonata.__createFrame_push'))) {
+            return null;
+        }
+
+        var params = Object.create(null);
+        for(var ii = 0; ii < proc.arguments.length; ii++) {
+            params[proc.arguments[ii].value] = ii;
+        }
+
+        return compileFastLambdaExpression(proc.body, params);
+    }
+
+    function compileFastLambdaExpression(expr, params) {
+        if(Object.prototype.hasOwnProperty.call(expr, 'predicate') ||
+            Object.prototype.hasOwnProperty.call(expr, 'group')) {
+            return null;
+        }
+        switch(expr.type) {
+            case 'variable':
+                if(Object.prototype.hasOwnProperty.call(params, expr.value)) {
+                    return function(args) {
+                        return args[params[expr.value]];
+                    };
+                }
+                return null;
+            case 'number':
+            case 'string':
+            case 'value':
+                return function() {
+                    return expr.value;
+                };
+            case 'binary':
+                return compileFastLambdaBinary(expr, params);
+        }
+        return null;
+    }
+
+    function compileFastLambdaBinary(expr, params) {
+        var lhs = compileFastLambdaExpression(expr.lhs, params);
+        var rhs = compileFastLambdaExpression(expr.rhs, params);
+        if(!lhs || !rhs) {
+            return null;
+        }
+
+        var op = expr.value;
+        var evaluator;
+        switch(op) {
+            case '+':
+            case '-':
+            case '*':
+            case '/':
+            case '%':
+                evaluator = evaluateNumericExpression;
+                break;
+            case '=':
+            case '!=':
+                evaluator = evaluateEqualityExpression;
+                break;
+            case '<':
+            case '<=':
+            case '>':
+            case '>=':
+                evaluator = evaluateComparisonExpression;
+                break;
+            default:
+                return null;
+        }
+
+        return function(args) {
+            try {
+                return evaluator(lhs(args), rhs(args), op);
+            } catch(err) {
+                err.position = expr.position;
+                err.token = op;
+                throw err;
+            }
+        };
     }
 
     /**
@@ -2121,10 +2256,11 @@ var jsonata = (function() {
      */
     async function applyProcedure(proc, args) {
         var result;
-        var env = createFrame(proc.environment);
-        Array.prototype.forEach.call(proc.arguments, function (param, index) {
-            env.bind(param.value, args[index]);
-        });
+        var bindings = Object.create(null);
+        for(var ii = 0; ii < proc.arguments.length; ii++) {
+            bindings[proc.arguments[ii].value] = args[ii];
+        }
+        var env = createFrame(proc.environment, bindings);
         if (typeof proc.body === 'function') {
             // this is a lambda that wraps a native function - generated by partially evaluating a native
             result = await applyNativeFunction(proc.body, env);
@@ -2306,8 +2442,8 @@ var jsonata = (function() {
      * @param {Object} enclosingEnvironment - Enclosing environment
      * @returns {{bind: bind, lookup: lookup}} Created frame
      */
-    function createFrame(enclosingEnvironment) {
-        var bindings = Object.create(null);
+    function createFrame(enclosingEnvironment, bindings) {
+        bindings = bindings || Object.create(null);
         const newFrame = {
             bind: function (name, value) {
                 bindings[name] = value;

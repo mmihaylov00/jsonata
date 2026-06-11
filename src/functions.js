@@ -21,6 +21,7 @@ const functions = (() => {
     var stringToArray = utils.stringToArray;
     var formatNumberAnalysisCache = Object.create(null);
     var maxFormatNumberCacheSize = 100;
+    var directCallbackSymbol = Symbol.for('jsonata.__direct_callback');
 
     var getCachedValue = function(cache, key, factory) {
         if(Object.prototype.hasOwnProperty.call(cache, key)) {
@@ -1525,6 +1526,51 @@ const functions = (() => {
     }
 
     /**
+     * Invoke a map/filter/each/sift/single callback, using an internal direct hook when present.
+     * @param {function} func - the function to be invoked
+     * @param {*} focus - value to use as `this`
+     * @param {*} arg1 - the value
+     * @param {*} arg2 - the position or key
+     * @param {*} arg3 - the whole structure
+     * @returns {*} the function result
+     */
+    function invokeHofFunction(func, focus, arg1, arg2, arg3) {
+        if (func[directCallbackSymbol] === true && typeof func.invoke === 'function') {
+            return func.invoke(arg1, arg2, arg3);
+        }
+        var func_args = hofFuncArgs(func, arg1, arg2, arg3);
+        return func.apply(focus, func_args);
+    }
+
+    /**
+     * Invoke a reduce callback, using an internal direct hook when present.
+     * @param {function} func - the function to be invoked
+     * @param {*} focus - value to use as `this`
+     * @param {number} arity - declared function arity
+     * @param {*} arg1 - the accumulator
+     * @param {*} arg2 - the value
+     * @param {*} arg3 - the position
+     * @param {*} arg4 - the whole sequence
+     * @returns {*} the function result
+     */
+    function invokeFoldLeftFunction(func, focus, arity, arg1, arg2, arg3, arg4) {
+        if (func[directCallbackSymbol] === true && typeof func.invokeReduce === 'function') {
+            return func.invokeReduce(arg1, arg2, arg3, arg4);
+        }
+        if (func[directCallbackSymbol] === true && typeof func.invoke === 'function') {
+            return func.invoke(arg1, arg2, arg3, arg4);
+        }
+        var args = [arg1, arg2];
+        if (arity >= 3) {
+            args.push(arg3);
+        }
+        if (arity >= 4) {
+            args.push(arg4);
+        }
+        return func.apply(focus, args);
+    }
+
+    /**
      * Create a map from an array of arguments
      * @param {Array} [arr] - array to map over
      * @param {Function} func - function to apply
@@ -1539,9 +1585,8 @@ const functions = (() => {
         var result = this.createSequence();
         // do the map - iterate over the arrays, and invoke func
         for (var i = 0; i < arr.length; i++) {
-            var func_args = hofFuncArgs(func, arr[i], i, arr);
             // invoke func
-            var res = await func.apply(this, func_args);
+            var res = await invokeHofFunction(func, this, arr[i], i, arr);
             if (typeof res !== 'undefined') {
                 result.push(res);
             }
@@ -1566,9 +1611,8 @@ const functions = (() => {
 
         for (var i = 0; i < arr.length; i++) {
             var entry = arr[i];
-            var func_args = hofFuncArgs(func, entry, i, arr);
             // invoke func
-            var res = await func.apply(this, func_args);
+            var res = await invokeHofFunction(func, this, entry, i, arr);
             if (boolean(res)) {
                 result.push(entry);
             }
@@ -1597,9 +1641,8 @@ const functions = (() => {
             var entry = arr[i];
             var positiveResult = true;
             if (typeof func !== 'undefined') {
-                var func_args = hofFuncArgs(func, entry, i, arr);
                 // invoke func
-                var res = await func.apply(this, func_args);
+                var res = await invokeHofFunction(func, this, entry, i, arr);
                 positiveResult = boolean(res);
             }
             if (positiveResult) {
@@ -1685,14 +1728,7 @@ const functions = (() => {
         }
 
         while (index < sequence.length) {
-            var args = [result, sequence[index]];
-            if (arity >= 3) {
-                args.push(index);
-            }
-            if (arity >= 4) {
-                args.push(sequence);
-            }
-            result = await func.apply(this, args);
+            result = await invokeFoldLeftFunction(func, this, arity, result, sequence[index], index, sequence);
             index++;
         }
 
@@ -1877,9 +1913,8 @@ const functions = (() => {
         var result = this.createSequence();
 
         for (const key of Object.keys(obj)) {
-            var func_args = hofFuncArgs(func, obj[key], key, obj);
             // invoke func
-            var val = await func.apply(this, func_args);
+            var val = await invokeHofFunction(func, this, obj[key], key, obj);
             if(typeof val !== 'undefined') {
                 result.push(val);
             }
@@ -2116,9 +2151,8 @@ const functions = (() => {
 
         for (const item of Object.keys(arg)) {
             var entry = arg[item];
-            var func_args = hofFuncArgs(func, entry, item, arg);
             // invoke func
-            var res = await func.apply(this, func_args);
+            var res = await invokeHofFunction(func, this, entry, item, arg);
             if (boolean(res)) {
                 result[item] = entry;
             }

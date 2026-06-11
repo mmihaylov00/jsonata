@@ -1503,6 +1503,155 @@ describe("Tests optimized helper branches", () => {
         expect(utils.isArrayOfStrings("not an array")).to.equal(false);
     });
 
+    it("passes JSONata lambdas directly to native higher-order functions", async function() {
+        var originalApply = Function.prototype.apply;
+        var wrappedLambdaApplyCalls = 0;
+        var result;
+        try {
+            Function.prototype.apply = function(self, args) {
+                if(Object.prototype.hasOwnProperty.call(this, "arity")) {
+                    wrappedLambdaApplyCalls++;
+                }
+                return originalApply.call(this, self, args);
+            };
+            var expr = jsonata('$filter([1, 2, 3, 4], function($v){$v % 2 = 0})');
+            result = await expr.evaluate();
+        } finally {
+            Function.prototype.apply = originalApply;
+        }
+        expect(result).to.deep.equal([2, 4]);
+        expect(wrappedLambdaApplyCalls).to.equal(0);
+    });
+
+    it("uses direct callback hooks in native higher-order functions", async function() {
+        var directCallbackSymbol = Symbol.for('jsonata.__direct_callback');
+        var focus = {
+            createSequence: function() {
+                var result = [];
+                result.sequence = true;
+                return result;
+            }
+        };
+        var filterCalls = [];
+        var filterCallback = {
+            arity: 3,
+            invoke: function(value, index, array) {
+                filterCalls.push([value, index, array.length]);
+                return value > 1;
+            },
+            apply: function() {
+                throw new Error("direct callback hook was not used");
+            }
+        };
+        filterCallback[directCallbackSymbol] = true;
+        var filterResult = await functions.filter.call(focus, [1, 2, 3], filterCallback);
+        expect(filterResult).to.deep.equal([2, 3]);
+        expect(filterCalls).to.deep.equal([[1, 0, 3], [2, 1, 3], [3, 2, 3]]);
+
+        var reduceCalls = [];
+        var reduceCallback = {
+            arity: 4,
+            invoke: function(accumulator, value, index, array) {
+                reduceCalls.push([accumulator, value, index, array.length]);
+                return accumulator + value;
+            },
+            apply: function() {
+                throw new Error("direct reduce callback hook was not used");
+            }
+        };
+        reduceCallback[directCallbackSymbol] = true;
+        var reduceResult = await functions.foldLeft([1, 2, 3], reduceCallback, 0);
+        expect(reduceResult).to.equal(6);
+        expect(reduceCalls).to.deep.equal([[0, 1, 0, 3], [1, 2, 1, 3], [3, 3, 2, 3]]);
+    });
+
+    it("passes optional arguments to native JavaScript higher-order callbacks", async function() {
+        var expr = jsonata('$map([10, 20], $callback)');
+        expr.assign("callback", function(value, index, array) {
+            return value + index + array[0];
+        });
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([20, 31]);
+    });
+
+    it("does not treat JavaScript callback invoke properties as internal hooks", async function() {
+        var expr = jsonata('$map([1, 2], $callback)');
+        var callback = function(value) {
+            return value + 1;
+        };
+        callback.invoke = function() {
+            throw new Error("public invoke property should not be used");
+        };
+        expr.assign("callback", callback);
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([2, 3]);
+    });
+
+    it("fast-evaluates simple comparison callbacks", async function() {
+        var expr = jsonata('$filter([1, 2, 3], function($v){$v > 1})');
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([2, 3]);
+    });
+
+    it("fast-evaluates remaining simple binary callback operators", async function() {
+        var expr = jsonata('[$map([4], function($v){$v - 1}), $map([4], function($v){$v * 2}), $map([4], function($v){$v / 2}), $filter([1], function($v){$v != 2}), $filter([1], function($v){$v < 2}), $filter([1], function($v){$v <= 1}), $filter([2], function($v){$v >= 2})]');
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([3, 8, 2, 1, 1, 1, 2]);
+    });
+
+    it("preserves zero-argument map callback semantics", async function() {
+        var expr = jsonata('$map([1, 2], function(){1})');
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([1, 1]);
+    });
+
+    it("falls back for unsupported fast callback operators", async function() {
+        var expr = jsonata('$map(["a"], function($v){$v & "b"})');
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal("ab");
+    });
+
+    it("preserves four-argument reduce callback semantics", async function() {
+        var expr = jsonata('$reduce([1, 2, 3], function($a, $v, $i, $arr){$a + $arr[$i]}, 0)');
+        var result = await expr.evaluate();
+        expect(result).to.equal(6);
+    });
+
+    it("decorates errors from fast-evaluated callbacks", async function() {
+        var expr = jsonata('$map(["x"], function($v){$v + 1})');
+        await expect(expr.evaluate()).to.eventually.be.rejected.to.deep.contain({
+            code: "T2001",
+            token: "+"
+        });
+    });
+
+    it("validates signed lambdas passed to native higher-order functions", async function() {
+        var expr = jsonata('$map([1, 2], function($v)<n:n>{$v + 1})');
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([2, 3]);
+
+        expr = jsonata('$map(["x"], function($v)<n:n>{$v})');
+        await expect(expr.evaluate()).to.eventually.be.rejected.to.deep.contain({
+            code: "T0410"
+        });
+    });
+
+    it("uses normal lambda evaluation when internal callbacks are registered", async function() {
+        var expr = jsonata('$filter([1, 2, 3], function($v){$v > 1})');
+        var entries = 0;
+        var frames = 0;
+        expr.assign(Symbol.for('jsonata.__evaluate_entry'), function() {
+            entries++;
+        });
+        expr.assign(Symbol.for('jsonata.__createFrame_push'), function() {
+            frames++;
+        });
+        var result = await expr.evaluate();
+        expect(result).to.deep.equal([2, 3]);
+        expect(entries).to.be.greaterThan(0);
+        expect(frames).to.be.greaterThan(0);
+    });
+
     it("ignores inherited keys when casting an object to boolean", async function() {
         var input = Object.create({inherited: true});
         var expr = jsonata("$boolean($)");

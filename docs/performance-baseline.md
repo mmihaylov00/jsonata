@@ -158,15 +158,62 @@ Notable changes:
 - `targeted/target-path/1` improved from `18.608ms` mean to `3.227ms` mean for indexed absolute path access.
 - The non-indexed path cases are now in the low single-digit millisecond range and should be treated as noisy unless a multi-run average shows a consistent regression.
 
+## After Lambda Callback Fast Path
+
+Generated with:
+
+```bash
+npm run perf
+npm run --silent perf:json -- --top 12
+```
+
+Selected groups from the current human-readable report:
+
+| Group | Eval ms | Compile ms | Cases |
+| --- | ---: | ---: | ---: |
+| `performance` | 19.744 | 0.455 | 2 |
+| `target-path` | 16.513 | 0.423 | 2 |
+| `joins` | 7.527 | 4.790 | 39 |
+| `target-number-format` | 7.353 | 0.134 | 1 |
+| `object-constructor` | 7.183 | 3.361 | 22 |
+| `flattening` | 7.118 | 4.663 | 59 |
+| `function-fromMillis` | 6.313 | 8.120 | 90 |
+| `target-sort` | 5.792 | 0.091 | 1 |
+| `lambdas` | 5.438 | 2.204 | 14 |
+| `function-tomillis` | 5.021 | 4.051 | 51 |
+| `target-date-time` | 4.636 | 0.314 | 1 |
+| `target-hof` | 1.506 | 0.195 | 1 |
+
+Slowest evaluate cases:
+
+| Case | Mean ms |
+| --- | ---: |
+| `performance/case001.json#0` | 4.504 |
+| `targeted/target-path/1` | 3.477 |
+| `targeted/target-number-format/11` | 2.451 |
+| `performance/case000.json#0` | 2.077 |
+| `targeted/target-path/0` | 2.027 |
+| `targeted/target-sort/3` | 1.931 |
+| `object-constructor/case025.json#0` | 1.928 |
+| `targeted/target-date-time/10` | 1.545 |
+
+Notable changes compared with the indexed-filter-fast-path run:
+
+- `target-hof` improved from `7.552ms` to `1.506ms`, an `80.1%` reduction for the targeted map/filter/reduce case in the human-readable report.
+- `targeted/target-hof/5` improved from `2.517ms` mean to below the top slow-case cutoff in the human-readable report; the JSON report measured `1.627ms` total eval time for the group.
+- The improvement comes from bypassing the JavaScript rest-parameter callback wrapper for JSONata lambdas passed to native HOFs, reusing callback argument storage, and fast-evaluating simple parameter/literal/binary lambda bodies.
+- The fast path is intentionally narrow and falls back to normal evaluation for signatures, tail-call lambdas, predicates/groups, non-parameter variables, evaluator entry/exit callbacks, and frame-push callbacks.
+- `performance` and `target-path` remained effectively flat relative to the indexed-filter run; the path optimizations are unchanged.
+
 ## Remaining Pain Points
 
-The path-heavy cases remain the top groups, but they are no longer overwhelming outliers. The main indexed suffix case is now near the rest of the targeted hot operations.
+The path-heavy cases are again the clear top groups after the HOF callback improvement, but they are still far below the original baseline. The main indexed suffix case is near the rest of the targeted hot operations.
 
-The next optimization should focus on lower-risk per-operation hot spots that remain visible after path memoization and indexed-filter fast paths, rather than broadening expression memoization aggressively.
+The next optimization should focus on measured hot groups that still have broad applicability, rather than broadening expression memoization aggressively.
 
 Recommended next steps:
 
 - Collect a 5-run average before further source changes; current remaining groups are much closer together and more sensitive to timing noise.
-- Investigate `target-hof` map/filter/reduce and object construction next, since they are now in the same range as the remaining path cases.
+- Investigate object construction and joins next; they now sit ahead of `target-hof` in the targeted report.
 - Add a targeted benchmark for pure order-by terms over object arrays so sort-key precomputation continues to be tracked directly.
 - Consider broader root-path purity only with focused callback, registered-function, binding, and focus-regression tests.
