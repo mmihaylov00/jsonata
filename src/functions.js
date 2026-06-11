@@ -19,6 +19,20 @@ const functions = (() => {
     var getFunctionArity = utils.getFunctionArity;
     var deepEquals = utils.isDeepEqual;
     var stringToArray = utils.stringToArray;
+    var formatNumberAnalysisCache = Object.create(null);
+    var maxFormatNumberCacheSize = 100;
+
+    var getCachedValue = function(cache, key, factory) {
+        if(Object.prototype.hasOwnProperty.call(cache, key)) {
+            return cache[key];
+        }
+        var value = factory();
+        if(Object.keys(cache).length >= maxFormatNumberCacheSize) {
+            delete cache[Object.keys(cache)[0]];
+        }
+        cache[key] = value;
+        return value;
+    };
 
     /**
      * Sum function
@@ -776,272 +790,282 @@ const functions = (() => {
             return undefined;
         }
 
-        var defaults = {
-            "decimal-separator": ".",
-            "grouping-separator": ",",
-            "exponent-separator": "e",
-            "infinity": "Infinity",
-            "minus-sign": "-",
-            "NaN": "NaN",
-            "percent": "%",
-            "per-mille": "\u2030",
-            "zero-digit": "0",
-            "digit": "#",
-            "pattern-separator": ";"
-        };
-
-        // if `options` is specified, then its entries override defaults
-        var properties = defaults;
-        if (typeof options !== 'undefined') {
-            Object.keys(options).forEach(function (key) {
-                properties[key] = options[key];
-            });
-        }
-
-        var decimalDigitFamily = [];
-        var zeroCharCode = properties['zero-digit'].charCodeAt(0);
-        for (var ii = zeroCharCode; ii < zeroCharCode + 10; ii++) {
-            decimalDigitFamily.push(String.fromCharCode(ii));
-        }
-
-        var activeChars = decimalDigitFamily.concat([properties['decimal-separator'], properties['exponent-separator'], properties['grouping-separator'], properties.digit, properties['pattern-separator']]);
-
-        var subPictures = picture.split(properties['pattern-separator']);
-
-        if (subPictures.length > 2) {
-            throw {
-                code: 'D3080',
-                stack: (new Error()).stack
+        var analysisCacheKey = picture + "\u0000" + (typeof options === 'undefined' ? "" : JSON.stringify(options));
+        var analysis = getCachedValue(formatNumberAnalysisCache, analysisCacheKey, function() {
+            var defaults = {
+                "decimal-separator": ".",
+                "grouping-separator": ",",
+                "exponent-separator": "e",
+                "infinity": "Infinity",
+                "minus-sign": "-",
+                "NaN": "NaN",
+                "percent": "%",
+                "per-mille": "\u2030",
+                "zero-digit": "0",
+                "digit": "#",
+                "pattern-separator": ";"
             };
-        }
 
-        var splitParts = function (subpicture) {
-            var prefix = (function () {
-                var ch;
-                for (var ii = 0; ii < subpicture.length; ii++) {
-                    ch = subpicture.charAt(ii);
-                    if (activeChars.indexOf(ch) !== -1 && ch !== properties['exponent-separator']) {
-                        return subpicture.substring(0, ii);
-                    }
-                }
-                return "";
-            })();
-            var suffix = (function () {
-                var ch;
-                for (var ii = subpicture.length - 1; ii >= 0; ii--) {
-                    ch = subpicture.charAt(ii);
-                    if (activeChars.indexOf(ch) !== -1 && ch !== properties['exponent-separator']) {
-                        return subpicture.substring(ii + 1);
-                    }
-                }
-                return "";
-            })();
-            var activePart = subpicture.substring(prefix.length, subpicture.length - suffix.length);
-            var mantissaPart, exponentPart, integerPart, fractionalPart;
-            var exponentPosition = subpicture.indexOf(properties['exponent-separator'], prefix.length);
-            if (exponentPosition === -1 || exponentPosition > subpicture.length - suffix.length) {
-                mantissaPart = activePart;
-                exponentPart = undefined;
-            } else {
-                mantissaPart = activePart.substring(0, exponentPosition);
-                exponentPart = activePart.substring(exponentPosition + 1);
+            // if `options` is specified, then its entries override defaults
+            var properties = defaults;
+            if (typeof options !== 'undefined') {
+                Object.keys(options).forEach(function (key) {
+                    properties[key] = options[key];
+                });
             }
-            var decimalPosition = mantissaPart.indexOf(properties['decimal-separator']);
-            if (decimalPosition === -1) {
-                integerPart = mantissaPart;
-                fractionalPart = suffix;
-            } else {
-                integerPart = mantissaPart.substring(0, decimalPosition);
-                fractionalPart = mantissaPart.substring(decimalPosition + 1);
-            }
-            return {
-                prefix: prefix,
-                suffix: suffix,
-                activePart: activePart,
-                mantissaPart: mantissaPart,
-                exponentPart: exponentPart,
-                integerPart: integerPart,
-                fractionalPart: fractionalPart,
-                subpicture: subpicture
-            };
-        };
 
-        // validate the picture string, F&O 4.7.3
-        var validate = function (parts) {
-            var error;
-            var ii;
-            var subpicture = parts.subpicture;
-            var decimalPos = subpicture.indexOf(properties['decimal-separator']);
-            if (decimalPos !== subpicture.lastIndexOf(properties['decimal-separator'])) {
-                error = 'D3081';
+            var decimalDigitFamily = [];
+            var zeroCharCode = properties['zero-digit'].charCodeAt(0);
+            for (var ii = zeroCharCode; ii < zeroCharCode + 10; ii++) {
+                decimalDigitFamily.push(String.fromCharCode(ii));
             }
-            if (subpicture.indexOf(properties.percent) !== subpicture.lastIndexOf(properties.percent)) {
-                error = 'D3082';
-            }
-            if (subpicture.indexOf(properties['per-mille']) !== subpicture.lastIndexOf(properties['per-mille'])) {
-                error = 'D3083';
-            }
-            if (subpicture.indexOf(properties.percent) !== -1 && subpicture.indexOf(properties['per-mille']) !== -1) {
-                error = 'D3084';
-            }
-            var valid = false;
-            for (ii = 0; ii < parts.mantissaPart.length; ii++) {
-                var ch = parts.mantissaPart.charAt(ii);
-                if (decimalDigitFamily.indexOf(ch) !== -1 || ch === properties.digit) {
-                    valid = true;
-                    break;
-                }
-            }
-            if (!valid) {
-                error = 'D3085';
-            }
-            var charTypes = parts.activePart.split('').map(function (char) {
-                return activeChars.indexOf(char) === -1 ? 'p' : 'a';
-            }).join('');
-            if (charTypes.indexOf('p') !== -1) {
-                error = 'D3086';
-            }
-            if (decimalPos !== -1) {
-                if (subpicture.charAt(decimalPos - 1) === properties['grouping-separator'] || subpicture.charAt(decimalPos + 1) === properties['grouping-separator']) {
-                    error = 'D3087';
-                }
-            } else if (parts.integerPart.charAt(parts.integerPart.length - 1) === properties['grouping-separator']) {
-                error = 'D3088';
-            }
-            if (subpicture.indexOf(properties['grouping-separator'] + properties['grouping-separator']) !== -1) {
-                error = 'D3089';
-            }
-            var optionalDigitPos = parts.integerPart.indexOf(properties.digit);
-            if (optionalDigitPos !== -1 && parts.integerPart.substring(0, optionalDigitPos).split('').filter(function (char) {
-                return decimalDigitFamily.indexOf(char) > -1;
-            }).length > 0) {
-                error = 'D3090';
-            }
-            optionalDigitPos = parts.fractionalPart.lastIndexOf(properties.digit);
-            if (optionalDigitPos !== -1 && parts.fractionalPart.substring(optionalDigitPos).split('').filter(function (char) {
-                return decimalDigitFamily.indexOf(char) > -1;
-            }).length > 0) {
-                error = 'D3091';
-            }
-            var exponentExists = (typeof parts.exponentPart === 'string');
-            if (exponentExists && parts.exponentPart.length > 0 && (subpicture.indexOf(properties.percent) !== -1 || subpicture.indexOf(properties['per-mille']) !== -1)) {
-                error = 'D3092';
-            }
-            if (exponentExists && (parts.exponentPart.length === 0 || parts.exponentPart.split('').filter(function (char) {
-                return decimalDigitFamily.indexOf(char) === -1;
-            }).length > 0)) {
-                error = 'D3093';
-            }
-            if (error) {
+
+            var activeChars = decimalDigitFamily.concat([properties['decimal-separator'], properties['exponent-separator'], properties['grouping-separator'], properties.digit, properties['pattern-separator']]);
+
+            var subPictures = picture.split(properties['pattern-separator']);
+
+            if (subPictures.length > 2) {
                 throw {
-                    code: error,
+                    code: 'D3080',
                     stack: (new Error()).stack
                 };
             }
-        };
 
-        // analyse the picture string, F&O 4.7.4
-        var analyse = function (parts) {
-            var getGroupingPositions = function (part, toLeft) {
-                var positions = [];
-                var groupingPosition = part.indexOf(properties['grouping-separator']);
-                while (groupingPosition !== -1) {
-                    var charsToTheRight = (toLeft ? part.substring(0, groupingPosition) : part.substring(groupingPosition)).split('').filter(function (char) {
-                        return decimalDigitFamily.indexOf(char) !== -1 || char === properties.digit;
-                    }).length;
-                    positions.push(charsToTheRight);
-                    groupingPosition = parts.integerPart.indexOf(properties['grouping-separator'], groupingPosition + 1);
+            var splitParts = function (subpicture) {
+                var prefix = (function () {
+                    var ch;
+                    for (var ii = 0; ii < subpicture.length; ii++) {
+                        ch = subpicture.charAt(ii);
+                        if (activeChars.indexOf(ch) !== -1 && ch !== properties['exponent-separator']) {
+                            return subpicture.substring(0, ii);
+                        }
+                    }
+                    return "";
+                })();
+                var suffix = (function () {
+                    var ch;
+                    for (var ii = subpicture.length - 1; ii >= 0; ii--) {
+                        ch = subpicture.charAt(ii);
+                        if (activeChars.indexOf(ch) !== -1 && ch !== properties['exponent-separator']) {
+                            return subpicture.substring(ii + 1);
+                        }
+                    }
+                    return "";
+                })();
+                var activePart = subpicture.substring(prefix.length, subpicture.length - suffix.length);
+                var mantissaPart, exponentPart, integerPart, fractionalPart;
+                var exponentPosition = subpicture.indexOf(properties['exponent-separator'], prefix.length);
+                if (exponentPosition === -1 || exponentPosition > subpicture.length - suffix.length) {
+                    mantissaPart = activePart;
+                    exponentPart = undefined;
+                } else {
+                    mantissaPart = activePart.substring(0, exponentPosition);
+                    exponentPart = activePart.substring(exponentPosition + 1);
                 }
-                return positions;
-            };
-            var integerPartGroupingPositions = getGroupingPositions(parts.integerPart);
-            var regular = function (indexes) {
-                // are the grouping positions regular? i.e. same interval between each of them
-                if (indexes.length === 0) {
-                    return 0;
+                var decimalPosition = mantissaPart.indexOf(properties['decimal-separator']);
+                if (decimalPosition === -1) {
+                    integerPart = mantissaPart;
+                    fractionalPart = suffix;
+                } else {
+                    integerPart = mantissaPart.substring(0, decimalPosition);
+                    fractionalPart = mantissaPart.substring(decimalPosition + 1);
                 }
-                var gcd = function (a, b) {
-                    return b === 0 ? a : gcd(b, a % b);
+                return {
+                    prefix: prefix,
+                    suffix: suffix,
+                    activePart: activePart,
+                    mantissaPart: mantissaPart,
+                    exponentPart: exponentPart,
+                    integerPart: integerPart,
+                    fractionalPart: fractionalPart,
+                    subpicture: subpicture
                 };
-                // find the greatest common divisor of all the positions
-                var factor = indexes.reduce(gcd);
-                // is every position separated by this divisor? If so, it's regular
-                for (var index = 1; index <= indexes.length; index++) {
-                    if (indexes.indexOf(index * factor) === -1) {
-                        return 0;
+            };
+
+            // validate the picture string, F&O 4.7.3
+            var validate = function (parts) {
+                var error;
+                var ii;
+                var subpicture = parts.subpicture;
+                var decimalPos = subpicture.indexOf(properties['decimal-separator']);
+                if (decimalPos !== subpicture.lastIndexOf(properties['decimal-separator'])) {
+                    error = 'D3081';
+                }
+                if (subpicture.indexOf(properties.percent) !== subpicture.lastIndexOf(properties.percent)) {
+                    error = 'D3082';
+                }
+                if (subpicture.indexOf(properties['per-mille']) !== subpicture.lastIndexOf(properties['per-mille'])) {
+                    error = 'D3083';
+                }
+                if (subpicture.indexOf(properties.percent) !== -1 && subpicture.indexOf(properties['per-mille']) !== -1) {
+                    error = 'D3084';
+                }
+                var valid = false;
+                for (ii = 0; ii < parts.mantissaPart.length; ii++) {
+                    var ch = parts.mantissaPart.charAt(ii);
+                    if (decimalDigitFamily.indexOf(ch) !== -1 || ch === properties.digit) {
+                        valid = true;
+                        break;
                     }
                 }
-                return factor;
+                if (!valid) {
+                    error = 'D3085';
+                }
+                var charTypes = parts.activePart.split('').map(function (char) {
+                    return activeChars.indexOf(char) === -1 ? 'p' : 'a';
+                }).join('');
+                if (charTypes.indexOf('p') !== -1) {
+                    error = 'D3086';
+                }
+                if (decimalPos !== -1) {
+                    if (subpicture.charAt(decimalPos - 1) === properties['grouping-separator'] || subpicture.charAt(decimalPos + 1) === properties['grouping-separator']) {
+                        error = 'D3087';
+                    }
+                } else if (parts.integerPart.charAt(parts.integerPart.length - 1) === properties['grouping-separator']) {
+                    error = 'D3088';
+                }
+                if (subpicture.indexOf(properties['grouping-separator'] + properties['grouping-separator']) !== -1) {
+                    error = 'D3089';
+                }
+                var optionalDigitPos = parts.integerPart.indexOf(properties.digit);
+                if (optionalDigitPos !== -1 && parts.integerPart.substring(0, optionalDigitPos).split('').filter(function (char) {
+                    return decimalDigitFamily.indexOf(char) > -1;
+                }).length > 0) {
+                    error = 'D3090';
+                }
+                optionalDigitPos = parts.fractionalPart.lastIndexOf(properties.digit);
+                if (optionalDigitPos !== -1 && parts.fractionalPart.substring(optionalDigitPos).split('').filter(function (char) {
+                    return decimalDigitFamily.indexOf(char) > -1;
+                }).length > 0) {
+                    error = 'D3091';
+                }
+                var exponentExists = (typeof parts.exponentPart === 'string');
+                if (exponentExists && parts.exponentPart.length > 0 && (subpicture.indexOf(properties.percent) !== -1 || subpicture.indexOf(properties['per-mille']) !== -1)) {
+                    error = 'D3092';
+                }
+                if (exponentExists && (parts.exponentPart.length === 0 || parts.exponentPart.split('').filter(function (char) {
+                    return decimalDigitFamily.indexOf(char) === -1;
+                }).length > 0)) {
+                    error = 'D3093';
+                }
+                if (error) {
+                    throw {
+                        code: error,
+                        stack: (new Error()).stack
+                    };
+                }
             };
 
-            var regularGrouping = regular(integerPartGroupingPositions);
-            var fractionalPartGroupingPositions = getGroupingPositions(parts.fractionalPart, true);
+            // analyse the picture string, F&O 4.7.4
+            var analyse = function (parts) {
+                var getGroupingPositions = function (part, toLeft) {
+                    var positions = [];
+                    var groupingPosition = part.indexOf(properties['grouping-separator']);
+                    while (groupingPosition !== -1) {
+                        var charsToTheRight = (toLeft ? part.substring(0, groupingPosition) : part.substring(groupingPosition)).split('').filter(function (char) {
+                            return decimalDigitFamily.indexOf(char) !== -1 || char === properties.digit;
+                        }).length;
+                        positions.push(charsToTheRight);
+                        groupingPosition = parts.integerPart.indexOf(properties['grouping-separator'], groupingPosition + 1);
+                    }
+                    return positions;
+                };
+                var integerPartGroupingPositions = getGroupingPositions(parts.integerPart);
+                var regular = function (indexes) {
+                // are the grouping positions regular? i.e. same interval between each of them
+                    if (indexes.length === 0) {
+                        return 0;
+                    }
+                    var gcd = function (a, b) {
+                        return b === 0 ? a : gcd(b, a % b);
+                    };
+                    // find the greatest common divisor of all the positions
+                    var factor = indexes.reduce(gcd);
+                    // is every position separated by this divisor? If so, it's regular
+                    for (var index = 1; index <= indexes.length; index++) {
+                        if (indexes.indexOf(index * factor) === -1) {
+                            return 0;
+                        }
+                    }
+                    return factor;
+                };
 
-            var minimumIntegerPartSize = parts.integerPart.split('').filter(function (char) {
-                return decimalDigitFamily.indexOf(char) !== -1;
-            }).length;
-            var scalingFactor = minimumIntegerPartSize;
+                var regularGrouping = regular(integerPartGroupingPositions);
+                var fractionalPartGroupingPositions = getGroupingPositions(parts.fractionalPart, true);
 
-            var fractionalPartArray = parts.fractionalPart.split('');
-            var minimumFactionalPartSize = fractionalPartArray.filter(function (char) {
-                return decimalDigitFamily.indexOf(char) !== -1;
-            }).length;
-            var maximumFactionalPartSize = fractionalPartArray.filter(function (char) {
-                return decimalDigitFamily.indexOf(char) !== -1 || char === properties.digit;
-            }).length;
-            var exponentPresent = typeof parts.exponentPart === 'string';
-            if (minimumIntegerPartSize === 0 && maximumFactionalPartSize === 0) {
-                if (exponentPresent) {
-                    minimumFactionalPartSize = 1;
-                    maximumFactionalPartSize = 1;
-                } else {
-                    minimumIntegerPartSize = 1;
-                }
-            }
-            if (exponentPresent && minimumIntegerPartSize === 0 && parts.integerPart.indexOf(properties.digit) !== -1) {
-                minimumIntegerPartSize = 1;
-            }
-            if (minimumIntegerPartSize === 0 && minimumFactionalPartSize === 0) {
-                minimumFactionalPartSize = 1;
-            }
-            var minimumExponentSize = 0;
-            if (exponentPresent) {
-                minimumExponentSize = parts.exponentPart.split('').filter(function (char) {
+                var minimumIntegerPartSize = parts.integerPart.split('').filter(function (char) {
                     return decimalDigitFamily.indexOf(char) !== -1;
                 }).length;
+                var scalingFactor = minimumIntegerPartSize;
+
+                var fractionalPartArray = parts.fractionalPart.split('');
+                var minimumFactionalPartSize = fractionalPartArray.filter(function (char) {
+                    return decimalDigitFamily.indexOf(char) !== -1;
+                }).length;
+                var maximumFactionalPartSize = fractionalPartArray.filter(function (char) {
+                    return decimalDigitFamily.indexOf(char) !== -1 || char === properties.digit;
+                }).length;
+                var exponentPresent = typeof parts.exponentPart === 'string';
+                if (minimumIntegerPartSize === 0 && maximumFactionalPartSize === 0) {
+                    if (exponentPresent) {
+                        minimumFactionalPartSize = 1;
+                        maximumFactionalPartSize = 1;
+                    } else {
+                        minimumIntegerPartSize = 1;
+                    }
+                }
+                if (exponentPresent && minimumIntegerPartSize === 0 && parts.integerPart.indexOf(properties.digit) !== -1) {
+                    minimumIntegerPartSize = 1;
+                }
+                if (minimumIntegerPartSize === 0 && minimumFactionalPartSize === 0) {
+                    minimumFactionalPartSize = 1;
+                }
+                var minimumExponentSize = 0;
+                if (exponentPresent) {
+                    minimumExponentSize = parts.exponentPart.split('').filter(function (char) {
+                        return decimalDigitFamily.indexOf(char) !== -1;
+                    }).length;
+                }
+
+                return {
+                    integerPartGroupingPositions: integerPartGroupingPositions,
+                    regularGrouping: regularGrouping,
+                    minimumIntegerPartSize: minimumIntegerPartSize,
+                    scalingFactor: scalingFactor,
+                    prefix: parts.prefix,
+                    fractionalPartGroupingPositions: fractionalPartGroupingPositions,
+                    minimumFactionalPartSize: minimumFactionalPartSize,
+                    maximumFactionalPartSize: maximumFactionalPartSize,
+                    minimumExponentSize: minimumExponentSize,
+                    suffix: parts.suffix,
+                    picture: parts.subpicture
+                };
+            };
+
+            var parts = subPictures.map(splitParts);
+            parts.forEach(validate);
+
+            var variables = parts.map(analyse);
+
+            if (variables.length === 1) {
+                variables.push(JSON.parse(JSON.stringify(variables[0])));
+                variables[1].prefix = properties['minus-sign'] + variables[1].prefix;
             }
 
             return {
-                integerPartGroupingPositions: integerPartGroupingPositions,
-                regularGrouping: regularGrouping,
-                minimumIntegerPartSize: minimumIntegerPartSize,
-                scalingFactor: scalingFactor,
-                prefix: parts.prefix,
-                fractionalPartGroupingPositions: fractionalPartGroupingPositions,
-                minimumFactionalPartSize: minimumFactionalPartSize,
-                maximumFactionalPartSize: maximumFactionalPartSize,
-                minimumExponentSize: minimumExponentSize,
-                suffix: parts.suffix,
-                picture: parts.subpicture
+                decimalDigitFamily: decimalDigitFamily,
+                properties: properties,
+                variables: variables
             };
-        };
+        });
 
-        var parts = subPictures.map(splitParts);
-        parts.forEach(validate);
-
-        var variables = parts.map(analyse);
-
+        var properties = analysis.properties;
+        var decimalDigitFamily = analysis.decimalDigitFamily;
+        var variables = analysis.variables;
         var minus_sign = properties['minus-sign'];
         var zero_digit = properties['zero-digit'];
         var decimal_separator = properties['decimal-separator'];
         var grouping_separator = properties['grouping-separator'];
-
-        if (variables.length === 1) {
-            variables.push(JSON.parse(JSON.stringify(variables[0])));
-            variables[1].prefix = minus_sign + variables[1].prefix;
-        }
-
-        // TODO cache the result of the analysis
 
         // format the number
         // bullet 1: TODO: NaN - not sure we'd ever get this in JSON
@@ -1418,10 +1442,12 @@ const functions = (() => {
             if (arg.length === 1) {
                 result = boolean(arg[0]);
             } else if (arg.length > 1) {
-                var trues = arg.filter(function (val) {
-                    return boolean(val);
-                });
-                result = trues.length > 0;
+                for(var ii = 0; ii < arg.length; ii++) {
+                    if (boolean(arg[ii])) {
+                        result = true;
+                        break;
+                    }
+                }
             }
         } else if (typeof arg === 'string') {
             if (arg.length > 0) {
@@ -1432,13 +1458,34 @@ const functions = (() => {
                 result = true;
             }
         } else if (arg !== null && typeof arg === 'object' && !isFunction(arg)) {
-            if (Object.keys(arg).length > 0) {
-                result = true;
+            for(var key in arg) {
+                if (Object.prototype.hasOwnProperty.call(arg, key)) {
+                    result = true;
+                    break;
+                }
             }
         } else if (typeof arg === 'boolean' && arg === true) {
             result = true;
         }
         return result;
+    }
+
+    /**
+     * Checks whether a value can be tracked in a primitive lookup table.
+     * @param {*} value - candidate value
+     * @returns {boolean} true for primitive values
+     */
+    function isPrimitive(value) {
+        return value === null || (typeof value !== 'object' && typeof value !== 'function');
+    }
+
+    /**
+     * Creates a distinct lookup key for primitive values.
+     * @param {*} value - primitive value
+     * @returns {string} lookup key
+     */
+    function primitiveKey(value) {
+        return typeof value + ":" + String(value);
     }
 
     /**
@@ -1946,24 +1993,26 @@ const functions = (() => {
             comp = comparator;
         }
 
-        var merge = async function (l, r) {
-            var merge_iter = async function (result, left, right) {
-                if (left.length === 0) {
-                    Array.prototype.push.apply(result, right);
-                } else if (right.length === 0) {
-                    Array.prototype.push.apply(result, left);
-                } else if (await comp(left[0], right[0])) { // invoke the comparator function
+        var merge = async function (left, right) {
+            var merged = new Array(left.length + right.length);
+            var leftIndex = 0;
+            var rightIndex = 0;
+            var mergedIndex = 0;
+            while (leftIndex < left.length && rightIndex < right.length) {
+                if (await comp(left[leftIndex], right[rightIndex])) { // invoke the comparator function
                     // if it returns true - swap left and right
-                    result.push(right[0]);
-                    await merge_iter(result, left, right.slice(1));
+                    merged[mergedIndex++] = right[rightIndex++];
                 } else {
                     // otherwise keep the same order
-                    result.push(left[0]);
-                    await merge_iter(result, left.slice(1), right);
+                    merged[mergedIndex++] = left[leftIndex++];
                 }
-            };
-            var merged = [];
-            await merge_iter(merged, l, r);
+            }
+            while (leftIndex < left.length) {
+                merged[mergedIndex++] = left[leftIndex++];
+            }
+            while (rightIndex < right.length) {
+                merged[mergedIndex++] = right[rightIndex++];
+            }
             return merged;
         };
 
@@ -2029,15 +2078,22 @@ const functions = (() => {
         }
 
         var results = isSequence(arr) ? this.createSequence() : [];
+        var seen = Object.create(null);
 
         for(var ii = 0; ii < arr.length; ii++) {
             var value = arr[ii];
             // is this value already in the result sequence?
             var includes = false;
-            for(var jj = 0; jj < results.length; jj++) {
-                if (deepEquals(value, results[jj])) {
-                    includes = true;
-                    break;
+            if(isPrimitive(value)) {
+                var key = primitiveKey(value);
+                includes = Object.prototype.hasOwnProperty.call(seen, key);
+                seen[key] = true;
+            } else {
+                for(var jj = 0; jj < results.length; jj++) {
+                    if (deepEquals(value, results[jj])) {
+                        includes = true;
+                        break;
+                    }
                 }
             }
             if(!includes) {

@@ -23,6 +23,8 @@
     "browserify-es5": "regenerator --include-runtime polyfill.js > jsonata-es5.js; browserify dist/jsonata.js --standalone jsonata >> jsonata-es5.js",
     "prepublishOnly": "npm run browserify && npm run minify && npm run build-es5",
     "lint": "eslint src",
+    "perf": "node test/performance/run-performance-suite.js",
+    "perf:json": "node test/performance/run-performance-suite.js --json",
     "doc": "jsdoc --configure jsdoc.json .",
     "cover": "nyc _mocha",
     "minify": "uglifyjs jsonata.js -o jsonata.min.js --compress --mangle",

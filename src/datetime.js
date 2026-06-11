@@ -15,6 +15,23 @@ const dateTime = (function () {
     'use strict';
 
     const stringToArray = utils.stringToArray;
+    const maxCachedPictures = 100;
+    const integerPictureCache = Object.create(null);
+    const integerRegexCache = Object.create(null);
+    const dateTimePictureCache = Object.create(null);
+    const dateTimeRegexCache = Object.create(null);
+
+    const getCachedValue = function(cache, key, factory) {
+        if(Object.prototype.hasOwnProperty.call(cache, key)) {
+            return cache[key];
+        }
+        const value = factory();
+        if(Object.keys(cache).length >= maxCachedPictures) {
+            delete cache[Object.keys(cache)[0]];
+        }
+        cache[key] = value;
+        return value;
+    };
 
     const few = ['Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
         'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
@@ -218,7 +235,9 @@ const dateTime = (function () {
 
         value = Math.floor(value);
 
-        const format = analyseIntegerPicture(picture);
+        const format = getCachedValue(integerPictureCache, picture, function() {
+            return analyseIntegerPicture(picture);
+        });
         return _formatInteger(value, format);
     }
 
@@ -924,11 +943,15 @@ const dateTime = (function () {
         if(typeof picture === 'undefined') {
             // default to ISO 8601 format
             if (iso8601Spec === null) {
-                iso8601Spec = analyseDateTimePicture('[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]');
+                iso8601Spec = getCachedValue(dateTimePictureCache, '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]', function() {
+                    return analyseDateTimePicture('[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001][Z01:01t]');
+                });
             }
             formatSpec = iso8601Spec;
         } else {
-            formatSpec = analyseDateTimePicture(picture);
+            formatSpec = getCachedValue(dateTimePictureCache, picture, function() {
+                return analyseDateTimePicture(picture);
+            });
         }
 
         const offsetMillis = (60 * offsetHours + offsetMinutes) * 60 * 1000;
@@ -1118,8 +1141,12 @@ const dateTime = (function () {
             return undefined;
         }
 
-        const formatSpec = analyseIntegerPicture(picture);
-        const matchSpec = generateRegex(formatSpec);
+        const matchSpec = getCachedValue(integerRegexCache, picture, function() {
+            const formatSpec = getCachedValue(integerPictureCache, picture, function() {
+                return analyseIntegerPicture(picture);
+            });
+            return generateRegex(formatSpec);
+        });
         //const fullRegex = '^' + matchSpec.regex + '$';
         //const matcher = new RegExp(fullRegex);
         // TODO validate input based on the matcher regex
@@ -1134,12 +1161,19 @@ const dateTime = (function () {
      * @returns {number} - the parsed timestamp in millis since the epoch
      */
     function parseDateTime(timestamp, picture) {
-        const formatSpec = analyseDateTimePicture(picture);
-        const matchSpec = generateRegex(formatSpec);
-        const fullRegex = '^' + matchSpec.parts.map(part => '(' + part.regex + ')').join('') + '$';
-
-        const matcher = new RegExp(fullRegex, 'i'); // TODO can cache this against the picture
-        var info = matcher.exec(timestamp);
+        const parseSpec = getCachedValue(dateTimeRegexCache, picture, function() {
+            const formatSpec = getCachedValue(dateTimePictureCache, picture, function() {
+                return analyseDateTimePicture(picture);
+            });
+            const matchSpec = generateRegex(formatSpec);
+            const fullRegex = '^' + matchSpec.parts.map(part => '(' + part.regex + ')').join('') + '$';
+            return {
+                matcher: new RegExp(fullRegex, 'i'),
+                matchSpec: matchSpec
+            };
+        });
+        const matchSpec = parseSpec.matchSpec;
+        var info = parseSpec.matcher.exec(timestamp);
         if (info !== null) {
             // validate what we've just parsed - do we have enough information to create a timestamp?
             // rules:

@@ -1,0 +1,123 @@
+[
+  {
+    "name": "nested absolute path predicates",
+    "group": "target-path",
+    "expr": "{\"items\": items.{\"foo\": \"bar\", \"count\": $count($$.items[text != \"\" and text != \"foo\"].row)}}",
+    "generator": {
+      "type": "items",
+      "size": 256
+    }
+  },
+  {
+    "name": "indexed absolute path access",
+    "group": "target-path",
+    "expr": "{\"items\": items#$i.{\"label\": $$.items[$i].label, \"text\": $$.items[text != \"\" and text != \"test\"][$i].text}}",
+    "generator": {
+      "type": "items",
+      "size": 256
+    }
+  },
+  {
+    "name": "tuple joins",
+    "group": "target-joins",
+    "expr": "Employee@$e.Contact@$c[$c.ssn = $e.SSN].{ \"name\": $e.(FirstName & \" \" & Surname), \"phone\": $c.Phone[type != \"home\"].number[] }",
+    "dataset": "employees"
+  },
+  {
+    "name": "sort generated numbers",
+    "group": "target-sort",
+    "expr": "numbers^(<$)",
+    "generator": {
+      "type": "numbers",
+      "size": 1000
+    }
+  },
+  {
+    "name": "group object construction",
+    "group": "target-group",
+    "expr": "items{category: $sum(value)}",
+    "generator": {
+      "type": "items",
+      "size": 1000
+    }
+  },
+  {
+    "name": "map filter reduce",
+    "group": "target-hof",
+    "expr": "$reduce($filter(values, function($v){$v % 2 = 0}), function($a, $v){$a + $v}, 0)",
+    "generator": {
+      "type": "values",
+      "size": 2000,
+      "distinct": 1000
+    }
+  },
+  {
+    "name": "distinct duplicate primitives",
+    "group": "target-distinct",
+    "expr": "$distinct(values)",
+    "generator": {
+      "type": "values",
+      "size": 2000,
+      "distinct": 100
+    }
+  },
+  {
+    "name": "large range count",
+    "group": "target-range",
+    "expr": "$count([1..100000])",
+    "dataset": null
+  },
+  {
+    "name": "wildcard descendant traversal",
+    "group": "target-traversal",
+    "expr": "$sum(**.value)",
+    "generator": {
+      "type": "tree",
+      "depth": 5,
+      "width": 4
+    }
+  },
+  {
+    "name": "regex match split replace",
+    "group": "target-regex",
+    "expr": "($match(text, /item\\d+/); $split(text, /,\\s*/); $replace(text, /item/, \"entry\"))",
+    "generator": {
+      "type": "text",
+      "size": 1000
+    }
+  },
+  {
+    "name": "date time parse format",
+    "group": "target-date-time",
+    "expr": "$map(dates, function($d){($toMillis($d.timestamp, $d.picture); $fromMillis($d.millis, $d.picture))})",
+    "generator": {
+      "type": "dates",
+      "size": 200
+    }
+  },
+  {
+    "name": "number formatting",
+    "group": "target-number-format",
+    "expr": "$map(values, function($v){$formatNumber($v, \"#,##0.00\")})",
+    "generator": {
+      "type": "numbers",
+      "size": 1000
+    }
+  },
+  {
+    "name": "transform update",
+    "group": "target-transform",
+    "expr": "$ ~> |items[value > 50]|{\"bucket\": category}, [\"obsolete\"]|",
+    "generator": {
+      "type": "items",
+      "size": 500
+    }
+  },
+  {
+    "name": "parser complex expression",
+    "group": "target-parser",
+    "mode": "compile",
+    "expr": "($square := function($x){$x*$x}; $chain := function($f, $g){function($x){$g($f($x))}}; $instructions := [$sum, $square, $string]; $instructions ~> $reduce($chain))",
+    "dataset": null
+  }
+]

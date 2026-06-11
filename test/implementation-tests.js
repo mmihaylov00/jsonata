@@ -11,10 +11,31 @@
 "use strict";
 
 var jsonata = require("../src/jsonata");
+var functions = require("../src/functions");
+var utils = require("../src/utils");
 var chai = require("chai");
 var chaiAsPromised = require("chai-as-promised");
 chai.use(chaiAsPromised);
 var expect = chai.expect;
+
+async function countLookups(key, callback) {
+    var original = functions.lookup;
+    var count = 0;
+    functions.lookup = function(input, lookupKey) {
+        if(lookupKey === key) {
+            count++;
+        }
+        return original.apply(this, arguments);
+    };
+    try {
+        var result = await callback(function() {
+            return count;
+        });
+        return {count: count, result: result};
+    } finally {
+        functions.lookup = original;
+    }
+}
 
 var testdata1 = {
     "foo": {
@@ -123,6 +144,7 @@ describe("Functions with side-effects", () => {
             it("should return result object", async function() {
                 var expr = jsonata("($sum([1..10000]); $millis())");
                 var result = await expr.evaluate(testdata2);
+                await new Promise(resolve => setTimeout(resolve, 1));
                 var result2 = await expr.evaluate(testdata2);
                 expect(result).to.not.equal(result2);
             });
@@ -171,6 +193,7 @@ describe("Functions with side-effects", () => {
         it("should return result object", async function() {
             var expr = jsonata("($sum([1..100000]); $now())");
             var result = await expr.evaluate(testdata2);
+            await new Promise(resolve => setTimeout(resolve, 1));
             var result2 = await expr.evaluate(testdata2);
             expect(result).to.not.equal(result2);
         });
@@ -1161,5 +1184,257 @@ describe("Tests that use internal frame push callbacks", () => {
             });
             expr.evaluate();
         });
+    });
+});
+
+describe("Tests performance caches", () => {
+    it("evicts cached number format pictures", async function() {
+        var result;
+        for(var ii = 0; ii <= 100; ii++) {
+            var picture = "p".repeat(ii + 1) + "000";
+            var expr = jsonata("$formatNumber(1, '" + picture + "')");
+            result = await expr.evaluate();
+        }
+        expect(result).to.equal("p".repeat(101) + "001");
+    });
+
+    it("evicts cached date-time pictures", async function() {
+        var result;
+        for(var ii = 0; ii <= 100; ii++) {
+            var suffix = "x".repeat(ii + 1);
+            var picture = "[Y0001]-[M01]-[D01] " + suffix;
+            var expr = jsonata("$fromMillis(0, '" + picture + "')");
+            result = await expr.evaluate();
+        }
+        expect(result).to.equal("1970-01-01 " + "x".repeat(101));
+    });
+});
+
+describe("Tests execution memoization", () => {
+    var memoInput = {
+        items: [
+            {label: "label_0", text: "text_0", row: 0, value: 5},
+            {label: "label_1", text: "text_1", row: 1, value: 4},
+            {label: "label_2", text: "text_2", row: 2, value: 3},
+            {label: "label_3", text: "text_3", row: 3, value: 2},
+            {label: "label_4", text: "text_4", row: 4, value: 1}
+        ]
+    };
+
+    it("memoizes repeated pure root paths inside a mapping", async function() {
+        var expr = jsonata('items.{"count": $count($$.items[text != "" and text != "foo"].row)}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return item.count;
+        })).to.deep.equal([5, 5, 5, 5, 5]);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("memoizes root prefixes before local index suffixes", async function() {
+        var expr = jsonata('items#$i.{"label": $$.items[$i].label}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return item.label;
+        })).to.deep.equal(["label_0", "label_1", "label_2", "label_3", "label_4"]);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("memoizes deterministic filtered root prefixes before local index suffixes", async function() {
+        var expr = jsonata('items#$i.{"text": $$.items[text != ""][$i].text}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return item.text;
+        })).to.deep.equal(["text_0", "text_1", "text_2", "text_3", "text_4"]);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("memoizes root prefixes before unsafe wildcard suffixes", async function() {
+        var expr = jsonata('items.{"values": $$.items.*}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result[0].values.slice(0, 4)).to.deep.equal(["label_0", "text_0", 0, 5]);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("reuses cached raw array root path values", async function() {
+        var expr = jsonata('items.{"all": $$.items}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result[0].all.length).to.equal(memoInput.items.length);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("reuses cached undefined root path prefixes", async function() {
+        var expr = jsonata('items.{"missing": $$.missing.foo}');
+        var measured = await countLookups("missing", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return Object.keys(item).length;
+        })).to.deep.equal([0, 0, 0, 0, 0]);
+        expect(measured.count).to.equal(1);
+    });
+
+    it("returns early when a local suffix stage empties a cached root prefix", async function() {
+        var expr = jsonata('items#$i.{"none": $$.items[$i > 100].label}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return Object.keys(item).length;
+        })).to.deep.equal([0, 0, 0, 0, 0]);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("stops suffix evaluation when a later step is empty", async function() {
+        var expr = jsonata('items#$i.{"none": $$.items[$i].missing}');
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return Object.keys(item).length;
+        })).to.deep.equal([0, 0, 0, 0, 0]);
+        expect(measured.count).to.equal(2);
+    });
+
+    it("does not memoize predicates that call registered functions", async function() {
+        var predicateCalls = 0;
+        var expr = jsonata('items.{"count": $count($$.items[$accept(text)].row)}');
+        expr.registerFunction("accept", function() {
+            predicateCalls++;
+            return true;
+        });
+        var result = await expr.evaluate(memoInput);
+        expect(result.map(function(item) {
+            return item.count;
+        })).to.deep.equal([5, 5, 5, 5, 5]);
+        expect(predicateCalls).to.equal(25);
+    });
+
+    it("does not treat grouped sort terms as pure", function() {
+        var expr = jsonata('items^(<items{label: value})');
+        return expect(expr.evaluate(memoInput)).to.eventually.be.rejected.to.deep.contain({
+            code: "T2008"
+        });
+    });
+
+    it("does not memoize filter predicates with wildcard path steps", async function() {
+        var input = {
+            items: [
+                {text: {value: "x"}, row: 0},
+                {text: {value: "y"}, row: 1}
+            ]
+        };
+        var expr = jsonata('items.{"x": $$.items[text.* = "x"].row}');
+        var result = await expr.evaluate(input);
+        expect(result.map(function(item) {
+            return item.x;
+        })).to.deep.equal([0, 0]);
+    });
+
+    it("memoizes filter predicates with pure staged relative paths", async function() {
+        var input = {
+            items: [
+                {text: [{value: "x"}], row: 0},
+                {text: [{value: "y"}], row: 1}
+            ]
+        };
+        var expr = jsonata('items.{"x": $$.items[text[value = "x"].value = "x"].row}');
+        var result = await expr.evaluate(input);
+        expect(result.map(function(item) {
+            return item.x;
+        })).to.deep.equal([0, 0]);
+    });
+
+    it("does not memoize filter predicates with local-variable stages", async function() {
+        var input = {
+            items: [
+                {text: ["x"], row: 0},
+                {text: ["y", "x"], row: 1}
+            ]
+        };
+        var expr = jsonata('items#$i.{"x": $$.items[text[$i] = "x"].row}');
+        var result = await expr.evaluate(input);
+        expect(result.map(function(item) {
+            return item.x;
+        })).to.deep.equal([0, 1]);
+    });
+
+    it("disables root-path memoization when evaluator callbacks are registered", async function() {
+        var expr = jsonata('items.{"count": $count($$.items[text != ""].row)}');
+        var entries = 0;
+        expr.assign(Symbol.for('jsonata.__evaluate_entry'), function() {
+            entries++;
+        });
+        var measured = await countLookups("items", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(entries).to.be.greaterThan(0);
+        expect(measured.count).to.equal(6);
+    });
+
+    it("precomputes pure sort keys once per input item", async function() {
+        var expr = jsonata('items^(<value)');
+        var measured = await countLookups("value", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result.map(function(item) {
+            return item.value;
+        })).to.deep.equal([1, 2, 3, 4, 5]);
+        expect(measured.count).to.equal(memoInput.items.length);
+    });
+
+    it("does not precompute impure sort keys", async function() {
+        var keyCalls = 0;
+        var expr = jsonata('items^(<$key(value))');
+        expr.registerFunction("key", function(value) {
+            keyCalls++;
+            return value;
+        });
+        var result = await expr.evaluate(memoInput);
+        expect(result.map(function(item) {
+            return item.value;
+        })).to.deep.equal([1, 2, 3, 4, 5]);
+        expect(keyCalls).to.be.greaterThan(memoInput.items.length);
+    });
+});
+
+describe("Tests optimized helper branches", () => {
+    it("detects non-array values in string array checks", function() {
+        expect(utils.isArrayOfStrings("not an array")).to.equal(false);
+    });
+
+    it("ignores inherited keys when casting an object to boolean", async function() {
+        var input = Object.create({inherited: true});
+        var expr = jsonata("$boolean($)");
+        var result = await expr.evaluate(input);
+        expect(result).to.equal(false);
+    });
+
+    it("enforces sequence limits while accumulating grouped values", function() {
+        var expr = jsonata('arr{"a": $}', {sequence: 2});
+        expect(expr.evaluate({arr: [1, 2, 3]})).to.eventually.be.rejected.to.deep.contain({
+            code: "D2015"
+        });
+    });
+
+    it("accumulates grouped values within sequence limits", async function() {
+        var expr = jsonata('arr{"a": $}', {sequence: 3});
+        var result = await expr.evaluate({arr: [1, 2, 3]});
+        expect(result).to.deep.equal({a: [1, 2, 3]});
+    });
+
+    it("accumulates grouped array values", async function() {
+        var expr = jsonata('arr{"a": $}');
+        var result = await expr.evaluate({arr: [[1], [2], [3]]});
+        expect(result).to.deep.equal({a: [1, 2, 3]});
     });
 });

@@ -33,12 +33,15 @@ const utils = (() => {
      * @returns {boolean} True if arg is an array of strings
      */
     function isArrayOfStrings(arg) {
-        var result = false;
-        /* istanbul ignore else */
-        if(Array.isArray(arg)) {
-            result = (arg.filter(function(item){return typeof item !== 'string';}).length === 0);
+        if(!Array.isArray(arg)) {
+            return false;
         }
-        return result;
+        for(var ii = 0; ii < arg.length; ii++) {
+            if(typeof arg[ii] !== 'string') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -47,11 +50,15 @@ const utils = (() => {
      * @returns {boolean} True if arg is an array of numbers
      */
     function isArrayOfNumbers(arg) {
-        var result = false;
-        if(Array.isArray(arg)) {
-            result = (arg.filter(function(item){return !isNumeric(item);}).length === 0);
+        if(!Array.isArray(arg)) {
+            return false;
         }
-        return result;
+        for(var ii = 0; ii < arg.length; ii++) {
+            if(!isNumeric(arg[ii])) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

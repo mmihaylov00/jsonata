@@ -38,6 +38,214 @@ var jsonata = (function() {
     // Start of Evaluator code
 
     var staticFrame = createFrame(null);
+    var memoizedPathSymbol = Symbol('jsonata.memoizedPath');
+    var pureSortSymbol = Symbol('jsonata.pureSort');
+
+    function setHiddenProperty(expr, key, value) {
+        Object.defineProperty(expr, key, {
+            value: value,
+            enumerable: false,
+            configurable: false
+        });
+    }
+
+    function getStages(step) {
+        return Array.isArray(step.stages) ? step.stages : [];
+    }
+
+    function isSafeFieldStep(step) {
+        return step.type === 'name' &&
+            typeof step.tuple === 'undefined' &&
+            typeof step.focus === 'undefined' &&
+            typeof step.index === 'undefined' &&
+            typeof step.ancestor === 'undefined' &&
+            typeof step.group === 'undefined' &&
+            typeof step.predicate === 'undefined' &&
+            typeof step.keepArray === 'undefined';
+    }
+
+    function isPureFilterStage(stage) {
+        return stage.type === 'filter' && isPureExpression(stage.expr);
+    }
+
+    function isPureRelativePath(expr) {
+        if(typeof expr.group !== 'undefined' || expr.tuple) {
+            return false;
+        }
+        if(!isSafeFieldStep(expr.steps[0])) {
+            return false;
+        }
+        for(var ii = 0; ii < expr.steps.length; ii++) {
+            var step = expr.steps[ii];
+            if(!isSafeFieldStep(step)) {
+                return false;
+            }
+            var stages = getStages(step);
+            for(var ss = 0; ss < stages.length; ss++) {
+                if(!isPureFilterStage(stages[ss])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    function isPureExpression(expr) {
+        switch(expr.type) {
+            case 'string':
+            case 'number':
+            case 'value':
+                return true;
+            case 'path':
+                return isPureRelativePath(expr);
+            case 'binary':
+                return ['=', '!=', '<', '<=', '>', '>=', 'and', 'or'].indexOf(expr.value) !== -1 &&
+                    isPureExpression(expr.lhs) &&
+                    isPureExpression(expr.rhs);
+            default:
+                return false;
+        }
+    }
+
+    function findMemoizableRootPathPrefix(expr) {
+        if(expr.type !== 'path' ||
+            expr.steps.length < 2 ||
+            expr.steps[0].type !== 'variable' ||
+            expr.steps[0].value !== '$' ||
+            typeof expr.group !== 'undefined' ||
+            expr.tuple ||
+            expr.keepSingletonArray) {
+            return undefined;
+        }
+
+        var memo = undefined;
+        for(var ii = 1; ii < expr.steps.length; ii++) {
+            var step = expr.steps[ii];
+            if(!isSafeFieldStep(step)) {
+                break;
+            }
+
+            var stages = getStages(step);
+            var stageIndex = 0;
+            while(stageIndex < stages.length && isPureFilterStage(stages[stageIndex])) {
+                stageIndex++;
+            }
+
+            memo = {
+                stepIndex: ii,
+                stageIndex: stageIndex
+            };
+
+            if(stageIndex < stages.length) {
+                break;
+            }
+        }
+
+        return memo;
+    }
+
+    function visitGroupExpression(expr, visit) {
+        if(typeof expr === 'undefined') {
+            return;
+        }
+        for(var ii = 0; ii < expr.lhs.length; ii++) {
+            visit(expr.lhs[ii][0]);
+            visit(expr.lhs[ii][1]);
+        }
+    }
+
+    function annotateOptimizableExpressions(ast) {
+        var nextPathId = 0;
+        var visit = function(expr) {
+            if(typeof expr === 'undefined' || expr === null) {
+                return;
+            }
+            switch(expr.type) {
+                case 'path':
+                    var memo = findMemoizableRootPathPrefix(expr);
+                    if(typeof memo !== 'undefined') {
+                        memo.id = nextPathId++;
+                        setHiddenProperty(expr, memoizedPathSymbol, memo);
+                    }
+                    for(var ii = 0; ii < expr.steps.length; ii++) {
+                        visit(expr.steps[ii]);
+                    }
+                    visitGroupExpression(expr.group, visit);
+                    break;
+                case 'sort':
+                    if(expr.terms.length > 0 && expr.terms.every(function(term) {
+                        return isPureExpression(term.expression);
+                    })) {
+                        setHiddenProperty(expr, pureSortSymbol, true);
+                    }
+                    for(var tt = 0; tt < expr.terms.length; tt++) {
+                        visit(expr.terms[tt].expression);
+                    }
+                    break;
+                case 'binary':
+                    visit(expr.lhs);
+                    visit(expr.rhs);
+                    break;
+                case 'unary':
+                    if(expr.value === '[') {
+                        for(var ee = 0; ee < expr.expressions.length; ee++) {
+                            visit(expr.expressions[ee]);
+                        }
+                    } else if(expr.value === '{') {
+                        visitGroupExpression(expr, visit);
+                    } else {
+                        visit(expr.expression);
+                    }
+                    break;
+                case 'function':
+                    visit(expr.procedure);
+                    for(var aa = 0; aa < expr.arguments.length; aa++) {
+                        visit(expr.arguments[aa]);
+                    }
+                    break;
+                case 'partial':
+                    visit(expr.procedure);
+                    for(var pp = 0; pp < expr.arguments.length; pp++) {
+                        visit(expr.arguments[pp]);
+                    }
+                    break;
+                case 'apply':
+                    visit(expr.lhs);
+                    visit(expr.rhs);
+                    break;
+                case 'condition':
+                    visit(expr.condition);
+                    visit(expr.then);
+                    visit(expr.else);
+                    break;
+                case 'block':
+                    for(var bb = 0; bb < expr.expressions.length; bb++) {
+                        visit(expr.expressions[bb]);
+                    }
+                    break;
+                case 'bind':
+                    visit(expr.lhs);
+                    visit(expr.rhs);
+                    break;
+                case 'lambda':
+                    visit(expr.body);
+                    break;
+                case 'transform':
+                    visit(expr.pattern);
+                    visit(expr.update);
+                    visit(expr.delete);
+                    break;
+            }
+
+            if (Object.prototype.hasOwnProperty.call(expr, 'predicate')) {
+                for(var pred = 0; pred < expr.predicate.length; pred++) {
+                    visit(expr.predicate[pred].expr);
+                }
+            }
+        };
+
+        visit(ast);
+    }
 
     /**
      * Evaluate expression against input data
@@ -147,6 +355,94 @@ var jsonata = (function() {
         return result;
     }
 
+    function cloneMemoizedValue(value, environment) {
+        if(value && isSequence(value)) {
+            var result = environment.base.createSequence();
+            for(var ii = 0; ii < value.length; ii++) {
+                result.push(value[ii]);
+            }
+            return result;
+        }
+        return value;
+    }
+
+    function copyStepWithStages(step, stages) {
+        var result = {};
+        Object.keys(step).forEach(function(key) {
+            if(key !== 'stages') {
+                result[key] = step[key];
+            }
+        });
+        if(stages.length > 0) {
+            result.stages = stages;
+        }
+        return result;
+    }
+
+    async function evaluatePathPrefix(expr, input, environment, memo) {
+        var inputSequence = environment.base.createSequence(input);
+
+        var resultSequence;
+        for(var ii = 0; ii <= memo.stepIndex; ii++) {
+            var step = expr.steps[ii];
+            var lastStep = ii === expr.steps.length - 1;
+            if(ii === memo.stepIndex) {
+                var stages = getStages(step);
+                if(memo.stageIndex < stages.length) {
+                    step = copyStepWithStages(step, stages.slice(0, memo.stageIndex));
+                    lastStep = false;
+                }
+            }
+            resultSequence = await evaluateStep(step, inputSequence, environment, lastStep);
+            if (typeof resultSequence === 'undefined' || resultSequence.length === 0) {
+                break;
+            }
+            inputSequence = resultSequence;
+        }
+        return resultSequence;
+    }
+
+    async function getMemoizedPathPrefix(expr, input, environment, memo) {
+        var pathCache = environment.base.pathCache;
+        var entry = pathCache[memo.id];
+        if(typeof entry !== 'undefined') {
+            return cloneMemoizedValue(entry.value, environment);
+        }
+        var value = await evaluatePathPrefix(expr, input, environment, memo);
+        pathCache[memo.id] = {
+            value: value
+        };
+        return cloneMemoizedValue(value, environment);
+    }
+
+    async function evaluateMemoizedPath(expr, input, environment, memo) {
+        var resultSequence = await getMemoizedPathPrefix(expr, input, environment, memo);
+        if(typeof resultSequence === 'undefined' || resultSequence.length === 0) {
+            return resultSequence;
+        }
+
+        var memoStep = expr.steps[memo.stepIndex];
+        var stages = getStages(memoStep);
+        if(memo.stageIndex < stages.length) {
+            resultSequence = await evaluateStages(stages.slice(memo.stageIndex), resultSequence, environment);
+            if (typeof resultSequence === 'undefined' || resultSequence.length === 0) {
+                return resultSequence;
+            }
+        }
+
+        var inputSequence = resultSequence;
+        for(var ii = memo.stepIndex + 1; ii < expr.steps.length; ii++) {
+            var step = expr.steps[ii];
+            resultSequence = await evaluateStep(step, inputSequence, environment, ii === expr.steps.length - 1);
+            if (typeof resultSequence === 'undefined' || resultSequence.length === 0) {
+                break;
+            }
+            inputSequence = resultSequence;
+        }
+
+        return resultSequence;
+    }
+
     /**
      * Evaluate path expression against input data
      * @param {Object} expr - JSONata expression
@@ -155,6 +451,11 @@ var jsonata = (function() {
      * @returns {*} Evaluated input data
      */
     async function evaluatePath(expr, input, environment) {
+        var memo = expr[memoizedPathSymbol];
+        if(typeof memo !== 'undefined' && environment.base.pathCache) {
+            return await evaluateMemoizedPath(expr, input, environment, memo);
+        }
+
         var inputSequence;
         // expr is an array of steps
         // if the first step is a variable reference ($...), including root reference ($$),
@@ -232,6 +533,28 @@ var jsonata = (function() {
             frame.bind(prop, tuple[prop]);
         }
         return frame;
+    }
+
+    /**
+     * Append a grouped item to an existing internal accumulation array.
+     * @param {Array} target - Internal grouped values
+     * @param {*} value - Value or values to append
+     * @param {Object} environment - Environment
+     */
+    function appendGroupValue(target, value, environment) {
+        /* istanbul ignore next */
+        if(typeof value === 'undefined') {
+            return;
+        }
+        var values = Array.isArray(value) ? value : [value];
+        if(environment.base.options && target.length + values.length > environment.base.options.sequence) {
+            throw {
+                code: "D2015",
+                stack: (new Error()).stack,
+                value: target.length + values.length
+            };
+        }
+        Array.prototype.push.apply(target, values);
     }
 
     /**
@@ -955,7 +1278,7 @@ var jsonata = (function() {
                             value: key
                         };
                     }
-                    var entry = {data: item, exprIndex: pairIndex};
+                    var entry = {data: item, exprIndex: pairIndex, grouped: false};
                     if (Object.prototype.hasOwnProperty.call(groups, key)) {
                         // a value already exists in this slot
                         if(groups[key].exprIndex !== pairIndex) {
@@ -969,8 +1292,13 @@ var jsonata = (function() {
                             };
                         }
 
-                        // append it as an array
-                        groups[key].data = fn.append.call(focus, groups[key].data, item);
+                        if(groups[key].grouped && Array.isArray(groups[key].data)) {
+                            appendGroupValue(groups[key].data, item, environment);
+                        } else {
+                            // append it as an array
+                            groups[key].data = fn.append.call(focus, groups[key].data, item);
+                            groups[key].grouped = Array.isArray(groups[key].data);
+                        }
                     } else {
                         groups[key] = entry;
                     }
@@ -1216,77 +1544,84 @@ var jsonata = (function() {
         var lhs = input;
         var isTupleSort = input.tupleStream ? true : false;
 
-        // sort the lhs array
-        // use comparator function
-        var comparator = async function(a, b) { 
+        var evaluateTerm = async function(term, item) {
+            var context = item;
+            var env = environment;
+            if(isTupleSort) {
+                context = item['@'];
+                env = createFrameFromTuple(environment, item);
+            }
+            return await evaluate(term.expression, context, env);
+        };
+
+        var compareTermValues = function(aa, bb, term) {
+            var comp = 0;
+            // type checks
+            var atype = typeof aa;
+            var btype = typeof bb;
+            // undefined should be last in sort order
+            if(atype === 'undefined') {
+                // swap them, unless btype is also undefined
+                comp = (btype === 'undefined') ? 0 : 1;
+                return comp;
+            }
+            if(btype === 'undefined') {
+                return -1;
+            }
+
+            // if aa or bb are not string or numeric values, then throw an error
+            if(!(atype === 'string' || atype === 'number') || !(btype === 'string' || btype === 'number')) {
+                throw {
+                    code: "T2008",
+                    stack: (new Error()).stack,
+                    position: expr.position,
+                    value: !(atype === 'string' || atype === 'number') ? aa : bb
+                };
+            }
+
+            //if aa and bb are not of the same type
+            if(atype !== btype) {
+                throw {
+                    code: "T2007",
+                    stack: (new Error()).stack,
+                    position: expr.position,
+                    value: aa,
+                    value2: bb
+                };
+            }
+            if(aa === bb) {
+                // both the same - move on to next term
+                return 0;
+            } else if (aa < bb) {
+                comp = -1;
+            } else {
+                comp = 1;
+            }
+            if(term.descending === true) {
+                comp = -comp;
+            }
+            return comp;
+        };
+
+        var compareKeys = function(a, b) {
             // expr.terms is an array of order-by in priority order
             var comp = 0;
             for(var index = 0; comp === 0 && index < expr.terms.length; index++) {
                 var term = expr.terms[index];
-                //evaluate the sort term in the context of a
-                var context = a;
-                var env = environment;
-                if(isTupleSort) {
-                    context = a['@'];
-                    env = createFrameFromTuple(environment, a);
-                }
-                var aa = await evaluate(term.expression, context, env);
-                //evaluate the sort term in the context of b
-                context = b;
-                env = environment;
-                if(isTupleSort) {
-                    context = b['@'];
-                    env = createFrameFromTuple(environment, b);
-                }
-                var bb = await evaluate(term.expression, context, env);
-
-                // type checks
-                var atype = typeof aa;
-                var btype = typeof bb;
-                // undefined should be last in sort order
-                if(atype === 'undefined') {
-                    // swap them, unless btype is also undefined
-                    comp = (btype === 'undefined') ? 0 : 1;
-                    continue;
-                }
-                if(btype === 'undefined') {
-                    comp = -1;
-                    continue;
-                }
-
-                // if aa or bb are not string or numeric values, then throw an error
-                if(!(atype === 'string' || atype === 'number') || !(btype === 'string' || btype === 'number')) {
-                    throw {
-                        code: "T2008",
-                        stack: (new Error()).stack,
-                        position: expr.position,
-                        value: !(atype === 'string' || atype === 'number') ? aa : bb
-                    };
-                }
-
-                //if aa and bb are not of the same type
-                if(atype !== btype) {
-                    throw {
-                        code: "T2007",
-                        stack: (new Error()).stack,
-                        position: expr.position,
-                        value: aa,
-                        value2: bb
-                    };
-                }
-                if(aa === bb) {
-                    // both the same - move on to next term
-                    continue;
-                } else if (aa < bb) {
-                    comp = -1;
-                } else {
-                    comp = 1;
-                }
-                if(term.descending === true) {
-                    comp = -comp;
-                }
+                comp = compareTermValues(a[index], b[index], term);
             }
             // only swap a & b if comp equals 1
+            return comp === 1;
+        };
+
+        // sort the lhs array
+        // use comparator function
+        var comparator = async function(a, b) {
+            var comp = 0;
+            for(var index = 0; comp === 0 && index < expr.terms.length; index++) {
+                var term = expr.terms[index];
+                comp = compareTermValues(await evaluateTerm(term, a), await evaluateTerm(term, b), term);
+            }
             return comp === 1;
         };
 
@@ -1295,7 +1630,35 @@ var jsonata = (function() {
             input: input
         };
         // the `focus` is passed in as the `this` for the invoked function
-        result = await fn.sort.apply(focus, [lhs, comparator]);
+        if(expr[pureSortSymbol]) {
+            var decorated = new Array(lhs.length);
+            for(var ii = 0; ii < lhs.length; ii++) {
+                var keys = [];
+                for(var kk = 0; kk < expr.terms.length; kk++) {
+                    keys.push(await evaluateTerm(expr.terms[kk], lhs[ii]));
+                }
+                decorated[ii] = {
+                    value: lhs[ii],
+                    keys: keys
+                };
+            }
+            var sorted = await fn.sort.apply(focus, [decorated, async function(a, b) {
+                return compareKeys(a.keys, b.keys);
+            }]);
+            result = new Array(sorted.length);
+            for(var ss = 0; ss < sorted.length; ss++) {
+                result[ss] = sorted[ss].value;
+            }
+            /* istanbul ignore else */
+            if(lhs.sequence) {
+                result.sequence = true;
+            }
+            if(lhs.tupleStream) {
+                result.tupleStream = true;
+            }
+        } else {
+            result = await fn.sort.apply(focus, [lhs, comparator]);
+        }
 
         return result;
     }
@@ -2129,6 +2492,9 @@ var jsonata = (function() {
             ast = parser(expr, options && options.recover);
             errors = ast.errors;
             delete ast.errors;
+            if(typeof errors === 'undefined') {
+                annotateOptimizableExpressions(ast);
+            }
         } catch(err) {
             // insert error message into structure
             populateMessage(err); // possible side-effects on `err`
@@ -2229,6 +2595,11 @@ var jsonata = (function() {
                 }
                 exec_env.base = exec_env;
                 exec_env.depth = 0;
+                if(exec_env.lookup(Symbol.for('jsonata.__evaluate_entry')) || exec_env.lookup(Symbol.for('jsonata.__evaluate_exit'))) {
+                    exec_env.pathCache = null;
+                } else {
+                    exec_env.pathCache = Object.create(null);
+                }
 
                 if(options && options.RegexEngine) {
                     exec_env.RegexEngine = options.RegexEngine;
