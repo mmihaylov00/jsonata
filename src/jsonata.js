@@ -549,12 +549,12 @@ var jsonata = (function() {
 
     async function fastLookup(input, key, environment) {
         var result;
-        if(Array.isArray(input) && !input.cons) {
+        if(Array.isArray(input)) {
             result = environment.base.createSequence();
             for(var ii = 0; ii < input.length; ii++) {
                 var res = await fastLookup(input[ii], key, environment);
                 if(typeof res !== 'undefined') {
-                    if(Array.isArray(res) && !res.cons) {
+                    if(Array.isArray(res)) {
                         Array.prototype.forEach.call(res, val => result.push(val));
                     } else {
                         result.push(res);
@@ -751,6 +751,13 @@ var jsonata = (function() {
         return await evaluateFastPath(path, input, environment);
     }
 
+    async function evaluateStepWithFastPath(step, input, environment, lastStep) {
+        if(canUseFastPath(environment) && isFastPathStep(step)) {
+            return await evaluateFastStep(step, input, environment, lastStep);
+        }
+        return await evaluateStep(step, input, environment, lastStep);
+    }
+
     async function evaluateMemoizedPath(expr, input, environment, memo) {
         var resultSequence = await getMemoizedPathPrefix(expr, input, environment, memo);
         if(typeof resultSequence === 'undefined' || resultSequence.length === 0) {
@@ -769,11 +776,7 @@ var jsonata = (function() {
         var inputSequence = resultSequence;
         for(var ii = memo.stepIndex + 1; ii < expr.steps.length; ii++) {
             var step = expr.steps[ii];
-            if(canUseFastPath(environment) && isFastPathStep(step)) {
-                resultSequence = await evaluateFastStep(step, inputSequence, environment, ii === expr.steps.length - 1);
-            } else {
-                resultSequence = await evaluateStep(step, inputSequence, environment, ii === expr.steps.length - 1);
-            }
+            resultSequence = await evaluateStepWithFastPath(step, inputSequence, environment, ii === expr.steps.length - 1);
             if (typeof resultSequence === 'undefined' || resultSequence.length === 0) {
                 break;
             }
@@ -829,7 +832,7 @@ var jsonata = (function() {
                 if(isTupleStream) {
                     tupleBindings = await evaluateTupleStep(step, inputSequence, tupleBindings, environment);
                 } else {
-                    resultSequence = await evaluateStep(step, inputSequence, environment, ii === expr.steps.length - 1);
+                    resultSequence = await evaluateStepWithFastPath(step, inputSequence, environment, ii === expr.steps.length - 1);
                 }
             }
 

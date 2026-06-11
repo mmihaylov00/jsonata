@@ -1469,6 +1469,31 @@ describe("Tests execution memoization", () => {
         expect(measured.count).to.equal(0);
     });
 
+    it("fast-evaluates safe suffix steps in mixed normal paths", async function() {
+        var expr = jsonata('items^(<value).label');
+        var measured = await countLookups("label", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result).to.deep.equal(["label_4", "label_3", "label_2", "label_1", "label_0"]);
+        expect(measured.count).to.equal(0);
+    });
+
+    it("uses normal suffix step evaluation in mixed paths when internal callbacks are registered", async function() {
+        var expr = jsonata('items^(<value).label');
+        var entries = 0;
+        expr.assign(Symbol.for('jsonata.__evaluate_entry'), function(expr) {
+            if(expr.type === "name" && expr.value === "label") {
+                entries++;
+            }
+        });
+        var measured = await countLookups("label", function() {
+            return expr.evaluate(memoInput);
+        });
+        expect(measured.result).to.deep.equal(["label_4", "label_3", "label_2", "label_1", "label_0"]);
+        expect(measured.count).to.equal(5);
+        expect(entries).to.equal(5);
+    });
+
     it("uses normal path evaluation when internal callbacks are registered", async function() {
         var expr = jsonata('items[text != "" and value > 2].row');
         var entries = 0;
@@ -1570,12 +1595,12 @@ describe("Tests execution memoization", () => {
         expect(result).to.equal("multi");
     });
 
-    it("preserves internal sequence arrays during fast path lookup", async function() {
+    it("matches generic lookup through internal sequence arrays", async function() {
         var sequence = [{value: "x"}];
         sequence.cons = true;
         var expr = jsonata('items.value');
         var result = await expr.evaluate({items: [sequence]});
-        expect(result).to.equal(undefined);
+        expect(result).to.equal("x");
     });
 
     it("fast-evaluates numeric predicate results", async function() {

@@ -323,6 +323,87 @@ Notable changes:
 - Preserved normal evaluation for evaluator entry/exit callbacks, stack guardrails, registered/user functions, local-variable predicates, wildcard/descendant paths, grouping, tuples, transforms, focus/index binding, and other unsupported expressions.
 - Added regression coverage for pure path results, literal-index predicates, promise-valued indexed results, raw array comparisons, multi-value predicates, callback fallback, and stack-guardrail fallback.
 
+## After Mixed Safe-Step Fast Dispatch
+
+Generated with:
+
+```bash
+npm run --silent perf:json -- --runs 20 --top 12
+```
+
+This run averages 20 full benchmark passes with `warmup=1` and `iterations=3`. The new source change lets normal path evaluation use the fast field-step evaluator for safe steps inside otherwise non-fast paths, such as sorted paths followed by deterministic field access.
+
+Top groups by total evaluate time:
+
+| Group | Eval ms | Compile ms | Cases |
+| --- | ---: | ---: | ---: |
+| `performance` | 12.803 | 0.383 | 2 |
+| `target-path` | 11.781 | 0.313 | 2 |
+| `joins` | 5.136 | 3.628 | 39 |
+| `target-number-format` | 5.038 | 0.093 | 1 |
+| `target-sort` | 4.438 | 0.070 | 1 |
+| `object-constructor` | 3.949 | 1.462 | 22 |
+| `lambdas` | 3.618 | 1.313 | 14 |
+| `target-date-time` | 3.498 | 0.116 | 1 |
+| `target-transform` | 2.998 | 0.124 | 1 |
+| `parent-operator` | 2.420 | 2.310 | 28 |
+| `target-regex` | 1.485 | 0.089 | 1 |
+| `tail-recursion` | 1.812 | 0.301 | 3 |
+
+Current 20-run average compared with the previous pure-path-fast-evaluator 20-run baseline:
+
+| Group | Before eval ms | Current eval ms | Change |
+| --- | ---: | ---: | ---: |
+| `performance` | 12.343 | 12.803 | 3.7% |
+| `target-path` | 11.638 | 11.781 | 1.2% |
+| `joins` | 5.105 | 5.136 | 0.6% |
+| `target-number-format` | 4.590 | 5.038 | 9.8% |
+| `target-sort` | 4.672 | 4.438 | -5.0% |
+| `object-constructor` | 3.592 | 3.949 | 9.9% |
+| `lambdas` | 3.759 | 3.618 | -3.7% |
+| `target-date-time` | 3.270 | 3.498 | 7.0% |
+| `target-transform` | 3.146 | 2.998 | -4.7% |
+| `parent-operator` | 2.249 | 2.420 | 7.6% |
+| `target-regex` | 1.483 | 1.485 | 0.2% |
+| `tail-recursion` | 1.408 | 1.812 | 28.7% |
+
+Current 20-run average compared with the original baseline before source optimizations:
+
+| Group | Original eval ms | Current eval ms | Change |
+| --- | ---: | ---: | ---: |
+| `performance` | 693.469 | 12.803 | -98.2% |
+| `target-path` | 643.179 | 11.781 | -98.2% |
+| `target-number-format` | 13.644 | 5.038 | -63.1% |
+| `target-date-time` | 10.185 | 3.498 | -65.7% |
+| `target-hof` | 7.630 | 0.857 | -88.8% |
+| `joins` | 6.752 | 5.136 | -23.9% |
+| `object-constructor` | 5.629 | 3.949 | -29.8% |
+| `target-sort` | 5.102 | 4.438 | -13.0% |
+
+Slowest evaluate cases:
+
+| Case | Mean ms |
+| --- | ---: |
+| `performance/case001.json#0` | 3.134 |
+| `targeted/target-path/1` | 2.893 |
+| `targeted/target-number-format/11` | 1.679 |
+| `targeted/target-sort/3` | 1.479 |
+| `targeted/target-date-time/10` | 1.166 |
+| `performance/case000.json#0` | 1.134 |
+| `targeted/target-path/0` | 1.034 |
+| `targeted/target-transform/12` | 0.999 |
+| `object-constructor/case025.json#0` | 0.953 |
+| `lambdas/case004.json#0` | 0.605 |
+| `tail-recursion/case004.json#0` | 0.569 |
+| `targeted/target-group/4` | 0.497 |
+
+Notable changes:
+
+- Safe normal path steps now reuse the same fast evaluator as complete pure paths and memoized suffix paths.
+- The fast dispatch remains disabled for evaluator callbacks and stack guardrails, and tuple-stream paths still use the tuple evaluator.
+- Added regression coverage for sorted mixed paths, callback fallback, and JSONata `cons` array lookup semantics.
+- Existing aggregate groups are now close enough that some 20-run movements are noise-sized; the most relevant tracked movement is `target-sort`, which improved from `4.672ms` to `4.438ms`.
+
 ## Remaining Pain Points
 
 The path-heavy cases are still the largest totals, but the main indexed suffix case is now closer to the rest of the targeted hot operations.
