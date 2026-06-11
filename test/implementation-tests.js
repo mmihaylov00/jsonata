@@ -37,6 +37,12 @@ async function countLookups(key, callback) {
     }
 }
 
+function hasSymbolDescription(object, description) {
+    return Object.getOwnPropertySymbols(object).some(function(symbol) {
+        return symbol.description === description;
+    });
+}
+
 var testdata1 = {
     "foo": {
         "bar": 42,
@@ -1241,6 +1247,91 @@ describe("Tests execution memoization", () => {
             return item.label;
         })).to.deep.equal(["label_0", "label_1", "label_2", "label_3", "label_4"]);
         expect(measured.count).to.equal(2);
+    });
+
+    it("marks focus-independent numeric filter suffixes as optimizable", function() {
+        var expr = jsonata('items#$i.{"label": $$.items[$i].label}');
+        var ast = expr.ast();
+        var predicate = ast.steps[1].lhs[0][1].steps[1].stages[0].expr;
+        expect(hasSymbolDescription(predicate, "jsonata.indexedFilter")).to.equal(true);
+    });
+
+    it("does not mark focus-dependent filter suffixes as optimizable", function() {
+        var expr = jsonata('items#$i.{"label": $$.items[row = $i].label}');
+        var ast = expr.ast();
+        var predicate = ast.steps[1].lhs[0][1].steps[1].stages[0].expr;
+        expect(hasSymbolDescription(predicate, "jsonata.indexedFilter")).to.equal(false);
+    });
+
+    it("preserves computed numeric filter suffixes", async function() {
+        var expr = jsonata('items#$i.{"label": $$.items[$i + 1].label}');
+        var result = await expr.evaluate(memoInput);
+        expect(result).to.deep.equal([
+            {label: "label_1"},
+            {label: "label_2"},
+            {label: "label_3"},
+            {label: "label_4"},
+            {}
+        ]);
+    });
+
+    it("preserves numeric array filter suffixes", async function() {
+        var expr = jsonata('items#$i.{"labels": $$.items[[$i, $i + 1]].label}');
+        var result = await expr.evaluate(memoInput);
+        expect(result).to.deep.equal([
+            {labels: ["label_0", "label_1"]},
+            {labels: ["label_1", "label_2"]},
+            {labels: ["label_2", "label_3"]},
+            {labels: ["label_3", "label_4"]},
+            {labels: "label_4"}
+        ]);
+    });
+
+    it("does not evaluate indexed filter suffixes for empty input", async function() {
+        var expr = jsonata('[][$i]');
+        var result = await expr.evaluate();
+        expect(result).to.equal(undefined);
+    });
+
+    it("preserves boolean semantics for nonnumeric indexed filter variables", async function() {
+        var expr = jsonata('($selector := "all"; items.{"labels": $$.items[$selector].label})');
+        var result = await expr.evaluate(memoInput);
+        expect(result.map(function(item) {
+            return item.labels;
+        })).to.deep.equal([
+            ["label_0", "label_1", "label_2", "label_3", "label_4"],
+            ["label_0", "label_1", "label_2", "label_3", "label_4"],
+            ["label_0", "label_1", "label_2", "label_3", "label_4"],
+            ["label_0", "label_1", "label_2", "label_3", "label_4"],
+            ["label_0", "label_1", "label_2", "label_3", "label_4"]
+        ]);
+    });
+
+    it("preserves falsey semantics for nonnumeric indexed filter variables", async function() {
+        var expr = jsonata('($selector := ""; items.{"labels": $$.items[$selector].label})');
+        var result = await expr.evaluate(memoInput);
+        expect(result.map(function(item) {
+            return Object.keys(item).length;
+        })).to.deep.equal([0, 0, 0, 0, 0]);
+    });
+
+    it("disables indexed filter optimization when evaluator callbacks are registered", async function() {
+        var expr = jsonata('items#$i.{"label": $$.items[$i].label}');
+        var predicateEvaluations = 0;
+        expr.assign(Symbol.for('jsonata.__evaluate_entry'), function(expr) {
+            if(expr.type === "variable" && expr.value === "i") {
+                predicateEvaluations++;
+            }
+        });
+        var result = await expr.evaluate(memoInput);
+        expect(result).to.deep.equal([
+            {label: "label_0"},
+            {label: "label_1"},
+            {label: "label_2"},
+            {label: "label_3"},
+            {label: "label_4"}
+        ]);
+        expect(predicateEvaluations).to.equal(25);
     });
 
     it("memoizes deterministic filtered root prefixes before local index suffixes", async function() {

@@ -39,6 +39,7 @@ var jsonata = (function() {
 
     var staticFrame = createFrame(null);
     var memoizedPathSymbol = Symbol('jsonata.memoizedPath');
+    var indexedFilterSymbol = Symbol('jsonata.indexedFilter');
     var pureSortSymbol = Symbol('jsonata.pureSort');
 
     function setHiddenProperty(expr, key, value) {
@@ -104,6 +105,42 @@ var jsonata = (function() {
                     isPureExpression(expr.rhs);
             default:
                 return false;
+        }
+    }
+
+    function isIndexedFilterExpression(expr) {
+        switch(expr.type) {
+            case 'number':
+                return true;
+            case 'variable':
+                return expr.value !== '' && expr.value !== '$';
+            case 'binary':
+                return ['+', '-', '*', '/', '%'].indexOf(expr.value) !== -1 &&
+                    isIndexedFilterExpression(expr.lhs) &&
+                    isIndexedFilterExpression(expr.rhs);
+            case 'unary':
+                if(expr.value === '[') {
+                    return expr.expressions.every(isIndexedFilterExpression);
+                }
+                return expr.value === '-' && isIndexedFilterExpression(expr.expression);
+            default:
+                return false;
+        }
+    }
+
+    function annotateFilterPredicate(expr) {
+        if(isIndexedFilterExpression(expr) && !expr[indexedFilterSymbol]) {
+            setHiddenProperty(expr, indexedFilterSymbol, true);
+        }
+    }
+
+    function visitStages(expr, visit) {
+        var stages = getStages(expr);
+        for(var ss = 0; ss < stages.length; ss++) {
+            if(stages[ss].type === 'filter') {
+                annotateFilterPredicate(stages[ss].expr);
+                visit(stages[ss].expr);
+            }
         }
     }
 
@@ -239,9 +276,12 @@ var jsonata = (function() {
 
             if (Object.prototype.hasOwnProperty.call(expr, 'predicate')) {
                 for(var pred = 0; pred < expr.predicate.length; pred++) {
+                    annotateFilterPredicate(expr.predicate[pred].expr);
                     visit(expr.predicate[pred].expr);
                 }
             }
+
+            visitStages(expr, visit);
         };
 
         visit(ast);
@@ -709,6 +749,37 @@ var jsonata = (function() {
      * @param {Object} environment - Environment
      * @returns {*} Result after applying predicates
      */
+    async function evaluateIndexedFilter(predicate, input, environment) {
+        var results = environment.base.createSequence();
+        if(input.length === 0) {
+            return results;
+        }
+
+        var res = await evaluate(predicate, undefined, environment);
+        if (isNumeric(res)) {
+            res = [res];
+        }
+        if (isArrayOfNumbers(res)) {
+            for(var index = 0; index < input.length; index++) {
+                var item = input[index];
+                Array.prototype.forEach.call(res, function (ires) {
+                    var ii = Math.floor(ires);
+                    if (ii < 0) {
+                        ii = input.length + ii;
+                    }
+                    if (ii === index) {
+                        results.push(item);
+                    }
+                });
+            }
+        } else if (fn.boolean(res)) {
+            for(index = 0; index < input.length; index++) {
+                results.push(input[index]);
+            }
+        }
+        return results;
+    }
+
     async function evaluateFilter(predicate, input, environment) {
         var results = environment.base.createSequence();
         if( input && input.tupleStream) {
@@ -731,6 +802,8 @@ var jsonata = (function() {
                     results.push(item);
                 }
             }
+        } else if (predicate[indexedFilterSymbol] && environment.base.pathCache && !input.tupleStream) {
+            results = await evaluateIndexedFilter(predicate, input, environment);
         } else {
             for (index = 0; index < input.length; index++) {
                 var item = input[index];

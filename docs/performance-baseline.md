@@ -111,14 +111,62 @@ Notable changes:
 - The first path case now benefits almost completely because the repeated pure root path is cached for the full subexpression.
 - The indexed path case still has a larger residual cost because only the deterministic root prefix is cached; the `$i` suffix must still be applied per outer item.
 
+## After Indexed Filter Fast Path
+
+Generated with:
+
+```bash
+npm run perf
+npm run --silent perf:json -- --top 12
+```
+
+Top groups by total evaluate time:
+
+| Group | Eval ms | Compile ms | Cases |
+| --- | ---: | ---: | ---: |
+| `performance` | 18.902 | 0.408 | 2 |
+| `target-path` | 16.247 | 0.368 | 2 |
+| `object-constructor` | 7.716 | 1.474 | 22 |
+| `target-hof` | 7.552 | 0.154 | 1 |
+| `joins` | 6.710 | 3.966 | 39 |
+| `target-number-format` | 6.426 | 0.108 | 1 |
+| `target-sort` | 5.412 | 0.096 | 1 |
+| `lambdas` | 4.837 | 1.632 | 14 |
+| `function-tomillis` | 4.569 | 2.512 | 51 |
+| `target-date-time` | 3.761 | 0.142 | 1 |
+| `flattening` | 3.692 | 3.296 | 59 |
+| `target-transform` | 3.606 | 0.131 | 1 |
+
+Slowest evaluate cases:
+
+| Case | Mean ms |
+| --- | ---: |
+| `performance/case001.json#0` | 4.131 |
+| `targeted/target-path/1` | 3.227 |
+| `targeted/target-hof/5` | 2.517 |
+| `targeted/target-path/0` | 2.188 |
+| `performance/case000.json#0` | 2.170 |
+| `targeted/target-number-format/11` | 2.142 |
+| `targeted/target-sort/3` | 1.804 |
+| `object-constructor/case025.json#0` | 1.670 |
+
+Notable changes:
+
+- `performance` improved from `67.080ms` after root-path memoization to `18.902ms`, a further `71.8%` reduction.
+- `target-path` improved from `60.778ms` after root-path memoization to `16.247ms`, a further `73.3%` reduction.
+- `performance/case001.json#0` improved from `20.347ms` mean to `4.131ms` mean by avoiding repeated full-array scans for `$i` suffix filters.
+- `targeted/target-path/1` improved from `18.608ms` mean to `3.227ms` mean for indexed absolute path access.
+- The non-indexed path cases are now in the low single-digit millisecond range and should be treated as noisy unless a multi-run average shows a consistent regression.
+
 ## Remaining Pain Points
 
-The path-heavy cases are no longer the overwhelming bottleneck, but indexed root-path suffixes remain the slowest individual operations. They now reuse deterministic root prefixes, then apply the local `$i` predicates per outer item to preserve JSONata scoping semantics.
+The path-heavy cases remain the top groups, but they are no longer overwhelming outliers. The main indexed suffix case is now near the rest of the targeted hot operations.
 
-The next optimization should focus on lower-risk per-operation hot spots that remain visible after path memoization, rather than broadening memoization aggressively.
+The next optimization should focus on lower-risk per-operation hot spots that remain visible after path memoization and indexed-filter fast paths, rather than broadening expression memoization aggressively.
 
 Recommended next steps:
 
-- Add a targeted benchmark for pure order-by terms over object arrays so sort-key precomputation is tracked directly.
-- Consider extending root-path purity only for additional deterministic operators after adding focused callback and registered-function regression tests.
-- Investigate `target-hof`, object construction, and date/time formatting only after collecting multi-run averages; they are now in the single-digit millisecond range and more sensitive to timing noise.
+- Collect a 5-run average before further source changes; current remaining groups are much closer together and more sensitive to timing noise.
+- Investigate `target-hof` map/filter/reduce and object construction next, since they are now in the same range as the remaining path cases.
+- Add a targeted benchmark for pure order-by terms over object arrays so sort-key precomputation continues to be tracked directly.
+- Consider broader root-path purity only with focused callback, registered-function, binding, and focus-regression tests.
