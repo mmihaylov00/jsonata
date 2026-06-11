@@ -41,6 +41,7 @@ var jsonata = (function() {
     var memoizedPathSymbol = Symbol('jsonata.memoizedPath');
     var indexedFilterSymbol = Symbol('jsonata.indexedFilter');
     var pureSortSymbol = Symbol('jsonata.pureSort');
+    var fastPathSymbol = Symbol('jsonata.fastPath');
     var directCallbackSymbol = Symbol.for('jsonata.__direct_callback');
 
     function setHiddenProperty(expr, key, value) {
@@ -107,6 +108,71 @@ var jsonata = (function() {
             default:
                 return false;
         }
+    }
+
+    function isBareRootStep(step) {
+        return step.type === 'variable' &&
+            step.value === '$' &&
+            typeof step.tuple === 'undefined' &&
+            typeof step.focus === 'undefined' &&
+            typeof step.index === 'undefined' &&
+            typeof step.ancestor === 'undefined' &&
+            typeof step.group === 'undefined' &&
+            typeof step.predicate === 'undefined' &&
+            typeof step.stages === 'undefined' &&
+            typeof step.keepArray === 'undefined';
+    }
+
+    function isFastExpression(expr) {
+        switch(expr.type) {
+            case 'string':
+            case 'number':
+            case 'value':
+                return true;
+            case 'path':
+                return isFastPathCandidate(expr);
+            case 'binary':
+                return ['=', '!=', '<', '<=', '>', '>=', 'and', 'or'].indexOf(expr.value) !== -1 &&
+                    isFastExpression(expr.lhs) &&
+                    isFastExpression(expr.rhs);
+            case 'unary':
+                return expr.value === '[' && expr.expressions.every(isFastExpression);
+            default:
+                return false;
+        }
+    }
+
+    function isFastPathStep(step) {
+        if(!isSafeFieldStep(step)) {
+            return false;
+        }
+        var stages = getStages(step);
+        for(var ss = 0; ss < stages.length; ss++) {
+            if(stages[ss].type !== 'filter' || !isFastExpression(stages[ss].expr)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function isFastPathCandidate(expr) {
+        if(expr.type !== 'path' ||
+            expr.steps.length === 0 ||
+            typeof expr.group !== 'undefined' ||
+            expr.tuple ||
+            expr.keepSingletonArray) {
+            return false;
+        }
+
+        for(var ii = 0; ii < expr.steps.length; ii++) {
+            if(ii === 0 && isBareRootStep(expr.steps[ii])) {
+                continue;
+            }
+            if(!isFastPathStep(expr.steps[ii])) {
+                return false;
+            }
+        }
+        return true;
     }
 
     function isIndexedFilterExpression(expr) {
@@ -200,6 +266,9 @@ var jsonata = (function() {
             }
             switch(expr.type) {
                 case 'path':
+                    if(isFastPathCandidate(expr) && !expr[fastPathSymbol]) {
+                        setHiddenProperty(expr, fastPathSymbol, true);
+                    }
                     var memo = findMemoizableRootPathPrefix(expr);
                     if(typeof memo !== 'undefined') {
                         memo.id = nextPathId++;
@@ -421,6 +490,10 @@ var jsonata = (function() {
     }
 
     async function evaluatePathPrefix(expr, input, environment, memo) {
+        if(canUseFastPath(environment)) {
+            return await evaluateFastPathPrefix(expr, input, environment, memo);
+        }
+
         var inputSequence = environment.base.createSequence(input);
 
         var resultSequence;
@@ -456,6 +529,228 @@ var jsonata = (function() {
         return cloneMemoizedValue(value, environment);
     }
 
+    function canUseFastPath(environment) {
+        return environment.base.pathCache &&
+            !(environment.base.options && environment.base.options.stack > 0);
+    }
+
+    function normalizeFastExpressionResult(result) {
+        if(!result || !isSequence(result) || result.tupleStream) {
+            return result;
+        }
+        if(result.length === 0) {
+            return undefined;
+        }
+        if(result.length === 1) {
+            return result[0];
+        }
+        return result;
+    }
+
+    async function fastLookup(input, key, environment) {
+        var result;
+        if(Array.isArray(input) && !input.cons) {
+            result = environment.base.createSequence();
+            for(var ii = 0; ii < input.length; ii++) {
+                var res = await fastLookup(input[ii], key, environment);
+                if(typeof res !== 'undefined') {
+                    if(Array.isArray(res) && !res.cons) {
+                        Array.prototype.forEach.call(res, val => result.push(val));
+                    } else {
+                        result.push(res);
+                    }
+                }
+            }
+        } else if(input !== null && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, key) && !isFunction(input)) {
+            result = input[key];
+        }
+        if(isPromise(result)) {
+            result = await result;
+        }
+        return result;
+    }
+
+    function finalizeFastStep(result, lastStep, environment) {
+        var resultSequence = environment.base.createSequence();
+        if(lastStep && result.length === 1 && Array.isArray(result[0]) && !isSequence(result[0])) {
+            resultSequence = result[0];
+        } else {
+            Array.prototype.forEach.call(result, function(res) {
+                if(!Array.isArray(res) || res.cons) {
+                    resultSequence.push(res);
+                } else {
+                    Array.prototype.forEach.call(res, val => resultSequence.push(val));
+                }
+            });
+        }
+        return resultSequence;
+    }
+
+    async function evaluateFastUnary(expr, input, environment) {
+        var result = [];
+        for(var ii = 0; ii < expr.expressions.length; ii++) {
+            var value = await evaluateFastExpression(expr.expressions[ii], input, environment);
+            if(typeof value !== 'undefined') {
+                if(Array.isArray(value) && !value.cons) {
+                    Array.prototype.forEach.call(value, val => result.push(val));
+                } else {
+                    result.push(value);
+                }
+            }
+        }
+        return result;
+    }
+
+    async function evaluateFastBinary(expr, input, environment) {
+        var result;
+        var lhs = await evaluateFastExpression(expr.lhs, input, environment);
+        var op = expr.value;
+        try {
+            if(op === 'and') {
+                return boolize(lhs) && boolize(await evaluateFastExpression(expr.rhs, input, environment));
+            }
+            if(op === 'or') {
+                return boolize(lhs) || boolize(await evaluateFastExpression(expr.rhs, input, environment));
+            }
+
+            var rhs = await evaluateFastExpression(expr.rhs, input, environment);
+            switch(op) {
+                case '=':
+                case '!=':
+                    result = evaluateEqualityExpression(lhs, rhs, op);
+                    break;
+                case '<':
+                case '<=':
+                case '>':
+                case '>=':
+                    result = evaluateComparisonExpression(lhs, rhs, op);
+                    break;
+            }
+        } catch(err) {
+            err.position = expr.position;
+            err.token = op;
+            throw err;
+        }
+        return result;
+    }
+
+    async function evaluateFastExpression(expr, input, environment) {
+        switch(expr.type) {
+            case 'string':
+            case 'number':
+            case 'value':
+                return expr.value;
+            case 'path':
+                return normalizeFastExpressionResult(await evaluateFastPath(expr, input, environment));
+            case 'binary':
+                return await evaluateFastBinary(expr, input, environment);
+            case 'unary':
+                return await evaluateFastUnary(expr, input, environment);
+        }
+    }
+
+    async function evaluateFastFilter(predicate, input, environment) {
+        var results = environment.base.createSequence();
+        if(!Array.isArray(input)) {
+            input = environment.base.createSequence(input);
+        }
+        if(predicate.type === 'number') {
+            var index = Math.floor(predicate.value);
+            if(index < 0) {
+                index = input.length + index;
+            }
+            var item = await input[index];
+            if(typeof item !== 'undefined') {
+                if(Array.isArray(item)) {
+                    results = item;
+                } else {
+                    results.push(item);
+                }
+            }
+        } else {
+            for(index = 0; index < input.length; index++) {
+                environment.base.guardrails();
+                item = input[index];
+                var res = await evaluateFastExpression(predicate, item, environment);
+                if(isNumeric(res)) {
+                    res = [res];
+                }
+                if(isArrayOfNumbers(res)) {
+                    Array.prototype.forEach.call(res, function(ires) {
+                        var ii = Math.floor(ires);
+                        if(ii < 0) {
+                            ii = input.length + ii;
+                        }
+                        if(ii === index) {
+                            results.push(item);
+                        }
+                    });
+                } else if(fn.boolean(res)) {
+                    results.push(item);
+                }
+            }
+        }
+        return results;
+    }
+
+    async function evaluateFastStep(step, input, environment, lastStep) {
+        var result = environment.base.createSequence();
+        for(var ii = 0; ii < input.length; ii++) {
+            environment.base.guardrails();
+            var res = await fastLookup(input[ii], step.value, environment);
+            var stages = getStages(step);
+            for(var ss = 0; ss < stages.length; ss++) {
+                res = await evaluateFastFilter(stages[ss].expr, res, environment);
+            }
+            if(typeof res !== 'undefined') {
+                result.push(res);
+            }
+        }
+        return finalizeFastStep(result, lastStep, environment);
+    }
+
+    async function evaluateFastPath(expr, input, environment) {
+        var inputSequence;
+        var start = 0;
+        if(isBareRootStep(expr.steps[0])) {
+            inputSequence = environment.base.createSequence(environment.lookup('$'));
+            start = 1;
+        } else if(Array.isArray(input) && expr.steps[0].type !== 'variable') {
+            inputSequence = input;
+        } else {
+            inputSequence = environment.base.createSequence(input);
+        }
+
+        var resultSequence = inputSequence;
+        for(var ii = start; ii < expr.steps.length; ii++) {
+            var step = expr.steps[ii];
+            resultSequence = await evaluateFastStep(step, resultSequence, environment, ii === expr.steps.length - 1);
+            if(typeof resultSequence === 'undefined' || resultSequence.length === 0) {
+                break;
+            }
+        }
+        return resultSequence;
+    }
+
+    async function evaluateFastPathPrefix(expr, input, environment, memo) {
+        var steps = [];
+        for(var ii = 0; ii <= memo.stepIndex; ii++) {
+            var step = expr.steps[ii];
+            if(ii === memo.stepIndex) {
+                var stages = getStages(step);
+                if(memo.stageIndex < stages.length) {
+                    step = copyStepWithStages(step, stages.slice(0, memo.stageIndex));
+                }
+            }
+            steps.push(step);
+        }
+        var path = {
+            type: 'path',
+            steps: steps
+        };
+        return await evaluateFastPath(path, input, environment);
+    }
+
     async function evaluateMemoizedPath(expr, input, environment, memo) {
         var resultSequence = await getMemoizedPathPrefix(expr, input, environment, memo);
         if(typeof resultSequence === 'undefined' || resultSequence.length === 0) {
@@ -474,7 +769,11 @@ var jsonata = (function() {
         var inputSequence = resultSequence;
         for(var ii = memo.stepIndex + 1; ii < expr.steps.length; ii++) {
             var step = expr.steps[ii];
-            resultSequence = await evaluateStep(step, inputSequence, environment, ii === expr.steps.length - 1);
+            if(canUseFastPath(environment) && isFastPathStep(step)) {
+                resultSequence = await evaluateFastStep(step, inputSequence, environment, ii === expr.steps.length - 1);
+            } else {
+                resultSequence = await evaluateStep(step, inputSequence, environment, ii === expr.steps.length - 1);
+            }
             if (typeof resultSequence === 'undefined' || resultSequence.length === 0) {
                 break;
             }
@@ -495,6 +794,9 @@ var jsonata = (function() {
         var memo = expr[memoizedPathSymbol];
         if(typeof memo !== 'undefined' && environment.base.pathCache) {
             return await evaluateMemoizedPath(expr, input, environment, memo);
+        }
+        if(expr[fastPathSymbol] && canUseFastPath(environment)) {
+            return await evaluateFastPath(expr, input, environment);
         }
 
         var inputSequence;

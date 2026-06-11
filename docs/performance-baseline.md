@@ -256,15 +256,82 @@ Notable changes:
 - Added exact hot paths for `#,##0.00` number formatting and exact ISO date-time formatting. The number fast path falls back for exponential-scale values so existing `1e21` behavior is preserved, and explicit-picture `$toMillis()` behavior is unchanged.
 - The path-heavy groups are still the largest totals, but this pass targeted remaining execution overhead after the earlier path memoization and indexed-filter work.
 
+## After Pure Path Fast Evaluator
+
+Generated with:
+
+```bash
+npm run --silent perf:json -- --runs 20 --top 12
+```
+
+This run averages 20 full benchmark passes with `warmup=1` and `iterations=3`. The text runner in the same verification pass measured the same groups in the same band; the 20-run JSON output is recorded here to reduce timing noise.
+
+Top groups by total evaluate time:
+
+| Group | Eval ms | Compile ms | Cases |
+| --- | ---: | ---: | ---: |
+| `performance` | 12.343 | 0.303 | 2 |
+| `target-path` | 11.638 | 0.290 | 2 |
+| `joins` | 5.105 | 3.698 | 39 |
+| `target-number-format` | 4.590 | 0.080 | 1 |
+| `target-sort` | 4.672 | 0.057 | 1 |
+| `object-constructor` | 3.592 | 1.582 | 22 |
+| `lambdas` | 3.759 | 1.339 | 14 |
+| `target-date-time` | 3.270 | 0.106 | 1 |
+| `target-transform` | 3.146 | 0.127 | 1 |
+| `parent-operator` | 2.249 | 2.313 | 28 |
+| `target-regex` | 1.483 | 0.083 | 1 |
+| `tail-recursion` | 1.408 | 0.365 | 3 |
+
+Current 20-run average compared with the previous stable 10-run baseline:
+
+| Group | Before eval ms | Current eval ms | Change |
+| --- | ---: | ---: | ---: |
+| `performance` | 15.751 | 12.343 | -21.6% |
+| `target-path` | 14.512 | 11.638 | -19.8% |
+| `joins` | 5.578 | 5.105 | -8.5% |
+| `target-number-format` | 5.136 | 4.590 | -10.6% |
+| `target-sort` | 4.753 | 4.672 | -1.7% |
+| `object-constructor` | 4.180 | 3.592 | -14.1% |
+| `lambdas` | 3.827 | 3.759 | -1.8% |
+| `target-date-time` | 3.530 | 3.270 | -7.4% |
+| `target-transform` | 3.662 | 3.146 | -14.1% |
+| `parent-operator` | 2.934 | 2.249 | -23.4% |
+| `tail-recursion` | 2.765 | 1.408 | -49.1% |
+
+Slowest evaluate cases:
+
+| Case | Mean ms |
+| --- | ---: |
+| `performance/case001.json#0` | 3.083 |
+| `targeted/target-path/1` | 2.799 |
+| `targeted/target-sort/3` | 1.557 |
+| `targeted/target-number-format/11` | 1.530 |
+| `targeted/target-date-time/10` | 1.090 |
+| `targeted/target-path/0` | 1.081 |
+| `targeted/target-transform/12` | 1.049 |
+| `performance/case000.json#0` | 1.032 |
+| `object-constructor/case025.json#0` | 0.920 |
+| `lambdas/case004.json#0` | 0.671 |
+| `targeted/target-regex/9` | 0.494 |
+| `targeted/target-group/4` | 0.486 |
+
+Notable changes:
+
+- Added a narrow fast evaluator for deterministic field-only paths with literal, comparison, boolean, and literal-array predicates.
+- Reused the fast evaluator for memoized root-path prefixes when evaluator callbacks and stack guardrails are inactive.
+- Preserved normal evaluation for evaluator entry/exit callbacks, stack guardrails, registered/user functions, local-variable predicates, wildcard/descendant paths, grouping, tuples, transforms, focus/index binding, and other unsupported expressions.
+- Added regression coverage for pure path results, literal-index predicates, promise-valued indexed results, raw array comparisons, multi-value predicates, callback fallback, and stack-guardrail fallback.
+
 ## Remaining Pain Points
 
-The path-heavy cases are again the clear top groups after the HOF callback improvement, but they are still far below the original baseline. The main indexed suffix case is near the rest of the targeted hot operations.
+The path-heavy cases are still the largest totals, but the main indexed suffix case is now closer to the rest of the targeted hot operations.
 
 The next optimization should focus on measured hot groups that still have broad applicability, rather than broadening expression memoization aggressively.
 
 Recommended next steps:
 
-- Collect a 5-run average before further source changes; current remaining groups are much closer together and more sensitive to timing noise.
-- Investigate object construction and joins next; they now sit ahead of `target-hof` in the targeted report.
+- Collect a 20-run average before further source changes; current remaining groups are close enough that single-run reports are misleading.
+- Investigate joins and object construction next; they are now the largest non-path groups in the targeted report.
 - Add a targeted benchmark for pure order-by terms over object arrays so sort-key precomputation continues to be tracked directly.
 - Consider broader root-path purity only with focused callback, registered-function, binding, and focus-regression tests.
